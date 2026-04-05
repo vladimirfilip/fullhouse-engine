@@ -118,6 +118,7 @@ def run_match(
     bot_paths: dict,          # {bot_id: "/path/to/bot.py"}
     n_hands: int = 200,
     verbose: bool = False,
+    seed: int = None,         # set for deterministic/reproducible match
 ) -> dict:
     """
     Run a complete match. Returns structured result dict with:
@@ -143,11 +144,13 @@ def run_match(
                 break
 
             hand_id = f"{match_id}_h{hand_num:04d}"
+            hand_seed = (seed * 1000003 + hand_num) if seed is not None else None
             engine  = PokerEngine(
                 hand_id        = hand_id,
                 bot_ids        = alive,
                 dealer_seat    = dealer % len(alive),
                 starting_stacks= {bid: stacks[bid] for bid in alive},
+                seed           = hand_seed,
             )
 
             result  = _play_hand(engine, procs, alive, verbose)
