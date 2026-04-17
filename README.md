@@ -1,8 +1,9 @@
-# Fullhouse Hackathon — Game Engine
+# Fullhouse Engine
 
-> The UK's first quantitative poker bot competition — 1 June 2026, London
+> The UK's first quantitative poker bot competition — 1 June 2026, One Canada Square, London
+> **£3,000 prize pool · Sponsored by Quadrature Capital**
 
-Participants write a Python bot that plays No-Limit Texas Hold'em against other bots. This repo contains everything needed to build and test your bot locally: the full game engine, sandbox runner, Swiss tournament system, and a live demo UI.
+Build a Python bot that plays No-Limit Texas Hold'em. This repo has everything you need to write and test your bot locally — the full game engine, sandbox runner, reference bots, and validator.
 
 ---
 
@@ -123,13 +124,10 @@ Four bots are included to test against:
 
 ```
 engine/         Game engine — NLHE rules, hand evaluation, chip tracking
-sandbox/        Bot runner + match orchestrator
-matchqueue/     Swiss pairing, standings, finalist selection
-bots/           Reference bots and participant template
-db/             Postgres schema (Supabase)
-queue/          Match job queue (BullMQ + Redis, Node.js)
-tests/          Engine test suite
-demo.py         Local demo server with live leaderboard UI
+sandbox/        Validator + local match runner
+bots/           Reference bots and starter template
+tests/          Engine unit tests
+demo.py         Quick local demo
 ```
 
 ---
@@ -138,13 +136,9 @@ demo.py         Local demo server with live leaderboard UI
 
 | Layer | Technology |
 |-------|------------|
-| Game engine | Python 3.9+ · eval7 |
+| Game engine | Python 3.9+ |
 | Hand evaluation | eval7 (same as MIT Pokerbots) |
-| Bot isolation | Docker · `--network none` · `--memory 256m` |
-| Match queue | BullMQ · Redis (Upstash) |
-| Database | Postgres (Supabase) |
-| Realtime leaderboard | Supabase Realtime |
-| Portal | Next.js · Supabase Auth |
+| Bot isolation | 2s time limit, no network, no file I/O |
 
 ---
 
