@@ -1,7 +1,7 @@
 # Fullhouse Engine
 
-> The UK's first quantitative poker bot competition — 1 June 2026, One Canada Square, London
-> **£3,000 prize pool · Sponsored by Quadrature Capital**
+> The UK's first quantitative poker bot competition — 1-5 June 2026, London
+> **£4,000 prize pool · Sponsored by Quadrature Capital**
 
 Build a Python bot that plays No-Limit Texas Hold'em. This repo has everything you need to write and test your bot locally — the full game engine, sandbox runner, reference bots, and validator.
 
