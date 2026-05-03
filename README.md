@@ -144,8 +144,8 @@ demo.py         Quick local demo
 
 ## Event details
 
-**Fullhouse Hackathon** — 1 June 2026, One Canada Square, London
-Prize pool: £3,000 · Lead sponsor: Quadrature Capital
+**Fullhouse Hackathon** — 1 June 2026, London
+Prize pool: £4,000+· Lead sponsor: Quadrature Capital
 
 [fullhousehackathon.com](https://fullhousehackathon.com)
 
