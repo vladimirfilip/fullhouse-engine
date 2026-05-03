@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from flask import Flask, Response, jsonify, render_template_string
 from sandbox.match import run_match
-from matchqueue.tournament import swiss_pairing as swissPairing, compute_standings as computeStandings, select_finalists as selectFinalists
+from engine.tournament import swiss_pairing, compute_standings, select_finalists
 
 app = Flask(__name__)
 
@@ -294,7 +294,7 @@ def run_single_match():
         all_results.append({"bot_id": bid, "bot_path": BOT_PATHS.get(bid,""), "chip_delta": delta})
 
     prev = {s["bot_id"]: s for s in state["standings"]}
-    new_standings = computeStandings(
+    new_standings = compute_standings(
         [{**s, "chip_delta": s["cumulative_delta"]} for s in state["standings"]] + all_results
     )
     state["standings"] = new_standings
@@ -327,7 +327,7 @@ def run_tournament():
         state["round"] = rnd
         emit(f"=== ROUND {rnd} ===", "bold")
 
-        standings_for_pairing = computeStandings(all_results) if all_results else bot_list
+        standings_for_pairing = compute_standings(all_results) if all_results else bot_list
         tables = swiss_pairing(standings_for_pairing, table_size=min(6, len(bot_list)))
 
         emit(f"  {len(tables)} table(s) this round", "dim")
@@ -350,10 +350,10 @@ def run_tournament():
                 kind = "win" if delta > 0 else "err" if delta < 0 else "dim"
                 emit(f"    {bid:22s} {sign}{delta:,}", kind)
 
-    final_standings = computeStandings(all_results)
+    final_standings = compute_standings(all_results)
     state["standings"] = final_standings
 
-    finalists = selectFinalists(final_standings, n=3)
+    finalists = select_finalists(final_standings, n=3)
     emit("=== FINALISTS ===", "bold")
     for i, f in enumerate(finalists):
         emit(f"  #{i+1} {f['bot_id']}  ({f['cumulative_delta']:+,})", "win")
