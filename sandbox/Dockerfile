@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir \
     eval7==0.1.7 \
     numpy==1.26.4 \
     scipy==1.13.0 \
-    treys==0.1.8
+    treys==0.1.8 \
+    scikit-learn==1.5.2
 
 # Create non-root user
 RUN useradd -u 1000 -m botuser

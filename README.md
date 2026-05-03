@@ -78,7 +78,7 @@ Invalid or missing actions default to fold. Raises below the minimum are snapped
 - **768 MB RAM**, 0.5 CPU core per bot
 - Crashes and exceptions auto-fold for that hand — your bot stays in the tournament
 
-**Available libraries:** `eval7` `numpy` `scipy` `treys` — request others before the event
+**Available libraries:** `eval7` `numpy` `scipy` `treys` `scikit-learn` — request others before the event
 
 ### Submission formats
 

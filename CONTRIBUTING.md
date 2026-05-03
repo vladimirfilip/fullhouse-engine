@@ -19,6 +19,21 @@ This is the official engine for Fullhouse Hackathon. The engine itself is frozen
 
 Copy `bots/template/bot.py` into a new folder under `bots/`, implement `decide()`, and open a PR. Good reference bots that demonstrate interesting strategies are welcome.
 
+## Need a Python library that isn't preinstalled?
+
+The sandbox container ships with `eval7`, `numpy`, `scipy`, `treys`, and `scikit-learn` plus the full Python 3.11 stdlib. If you need something else, **open a GitHub Issue with the title prefix `[library-request]`** by **18 May 2026 (23:59 UTC)**. We will review batched requests once and rebuild the sandbox image before the 1 June qualifier.
+
+Requests after 18 May 2026 will not make it in. Plan accordingly.
+
+What we'll generally accept:
+- Numerical/scientific (e.g. `pandas`, `networkx`, `scikit-learn` extensions)
+- Algorithm/data-structure libraries with no network or filesystem behaviour
+
+What we'll generally reject:
+- Anything that needs network access (`requests`, `httpx`, etc. are blocked at the OS level anyway)
+- Heavy ML training frameworks (`pytorch`, `tensorflow`, `jax`) — train offline, ship weights as `.npz` in `data/`
+- Native binaries that can't be `pip install`-ed cleanly
+
 ## Questions
 
 Open an issue or reach out via [fullhousehackathon.com](https://fullhousehackathon.com).
