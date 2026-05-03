@@ -7,9 +7,28 @@
 RULES:
   - Implement the decide() function below. That's it.
   - You may import any stdlib module and any library in requirements.txt
-  - You may NOT make network calls or read/write files
+  - You may NOT make network calls or read/write files DURING gameplay
   - You have 2 seconds to return an action or you auto-fold
   - If your function crashes, it auto-folds for that hand
+
+OPTIONAL DATA FILES (NEW):
+  Submit a .zip archive containing:
+    bot.py        (this file, required at root)
+    data/         (optional directory with .npz, .pkl, .bin, etc.)
+
+  At module-import time only, you can read from a sibling 'data/' directory:
+
+      import os
+      DATA_DIR = os.environ.get("BOT_DATA_DIR",
+                                os.path.join(os.path.dirname(__file__), "data"))
+      with open(os.path.join(DATA_DIR, "blueprint.npz"), "rb") as f:
+          BLUEPRINT = ...load(f)
+
+  Limits:
+    - Total submission (bot.py + data/) <= 250 MB
+    - data/ alone <= 200 MB
+    - bot.py <= 5 MB
+    - File access during decide() is blocked at the OS level
 
 CARD FORMAT:
   Cards are strings like "As" (Ace of spades), "Td" (Ten of diamonds)

@@ -73,12 +73,38 @@ Invalid or missing actions default to fold. Raises below the minimum are snapped
 
 **Rules:**
 - 2 seconds to return an action or your bot auto-folds
-- No network calls
-- No file I/O
-- 256 MB RAM, 0.5 CPU core per bot
+- No network calls during gameplay
+- No file writes ever; reads from `data/` allowed at module-import time only
+- **768 MB RAM**, 0.5 CPU core per bot
 - Crashes and exceptions auto-fold for that hand — your bot stays in the tournament
 
 **Available libraries:** `eval7` `numpy` `scipy` `treys` — request others before the event
+
+### Submission formats
+
+Pick whichever fits your bot:
+
+| Format | Use when |
+|---|---|
+| `bot.py` (single file) | Simple bot, no large lookup tables |
+| `bot.zip` containing `bot.py` + optional `data/` | You ship a CFR blueprint, neural-net weights, equity table, etc. |
+
+`data/` constraints:
+- ≤ 200 MB total
+- No `.py` files inside (use `bot.py` for code)
+- Read-only at runtime, accessed via `os.environ["BOT_DATA_DIR"]`
+- Loaded **at module-import time only** — gameplay actions still must respond in 2 s
+
+```python
+# bot.py
+import os, numpy as np
+DATA_DIR = os.environ.get("BOT_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+BLUEPRINT = np.load(os.path.join(DATA_DIR, "blueprint.npz"))   # loaded once at import
+
+def decide(state):
+    # use BLUEPRINT to make decisions — no file I/O here
+    ...
+```
 
 ---
 

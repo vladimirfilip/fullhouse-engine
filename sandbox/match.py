@@ -5,24 +5,85 @@ Runs a multi-hand match between N bots (2-9).
 Dev mode (USE_DOCKER=false):  bots run as local subprocesses via runner.py
 Prod mode (USE_DOCKER=true):  bots run in isolated Docker containers
 
+Submission formats supported (auto-detected from path):
+  - bot.py         single-file bot (legacy)
+  - bot/           directory containing bot.py + optional data/
+  - bot.zip        archive containing bot.py at root + optional data/
+
 The game engine is pure Python — this file handles all I/O and process management.
 """
 
 import json
+import os
+import shutil
 import subprocess
 import sys
-import os
+import tempfile
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from engine.game import PokerEngine, STARTING_STACK
 
-RUNNER_PATH  = Path(__file__).parent / "runner.py"
-SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "fullhouse-sandbox:latest")
-USE_DOCKER   = os.environ.get("USE_DOCKER", "false").lower() == "true"
+RUNNER_PATH    = Path(__file__).parent / "runner.py"
+SANDBOX_IMAGE  = os.environ.get("SANDBOX_IMAGE", "fullhouse-sandbox:latest")
+USE_DOCKER     = os.environ.get("USE_DOCKER", "false").lower() == "true"
 ACTION_TIMEOUT = int(os.environ.get("ACTION_TIMEOUT", "2"))
+
+# Resource limits enforced at the container level. Bumped from 256 -> 768 MB
+# in May 2026 to accommodate optional /bot/data/ payloads (CFR blueprints,
+# NN weights, lookup tables) that bots load at module-import time.
+CONTAINER_MEMORY     = os.environ.get("BOT_MEMORY", "768m")
+CONTAINER_CPUS       = os.environ.get("BOT_CPUS",   "0.5")
+CONTAINER_TMPFS_SIZE = os.environ.get("BOT_TMPFS",  "20m")
+
+# Per-match rolling action log exposed to bots in state["match_action_log"].
+# Lets bots build cross-hand opponent models within a match.
+MATCH_LOG_MAX_ENTRIES = 200
+
+
+# ---------------------------------------------------------------------------
+# Bot mount preparation
+# ---------------------------------------------------------------------------
+
+def _prepare_bot_mount(bot_path):
+    """Returns (mount_src, cleanup_dir).
+    Accepts: directory, .zip archive (extracted into tempdir), or .py file (legacy, copied into tempdir).
+    """
+    p = os.path.abspath(bot_path)
+
+    if os.path.isdir(p):
+        return p, None
+
+    if p.endswith(".zip") and os.path.isfile(p):
+        tmpdir = tempfile.mkdtemp(prefix="fhbot_")
+        with zipfile.ZipFile(p) as zf:
+            for member in zf.infolist():
+                name = member.filename
+                if name.startswith("/") or name.startswith("\\"):
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                    raise ValueError("Unsafe zip path (absolute): " + repr(name))
+                norm = os.path.normpath(os.path.join(tmpdir, name))
+                if not norm.startswith(tmpdir + os.sep) and norm != tmpdir:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                    raise ValueError("Unsafe zip path (traversal): " + repr(name))
+                if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                    raise ValueError("Unsafe zip path (symlink): " + repr(name))
+            zf.extractall(tmpdir)
+        if not os.path.isfile(os.path.join(tmpdir, "bot.py")):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise ValueError("Zip archive must contain bot.py at the root")
+        return tmpdir, tmpdir
+
+    if p.endswith(".py") and os.path.isfile(p):
+        tmpdir = tempfile.mkdtemp(prefix="fhbot_")
+        shutil.copy(p, os.path.join(tmpdir, "bot.py"))
+        return tmpdir, tmpdir
+
+    raise ValueError("Unsupported bot path (must be .py, .zip, or directory): " + repr(p))
 
 
 # ---------------------------------------------------------------------------
@@ -30,38 +91,57 @@ ACTION_TIMEOUT = int(os.environ.get("ACTION_TIMEOUT", "2"))
 # ---------------------------------------------------------------------------
 
 class BotProcess:
-    """
-    Wraps one bot running in a subprocess or Docker container.
+    """Wraps one bot in a subprocess or Docker container.
     Communication: newline-delimited JSON over stdin/stdout.
     """
 
-    def __init__(self, bot_id: str, bot_path: str):
+    def __init__(self, bot_id, bot_path):
         self.bot_id   = bot_id
         self.bot_path = bot_path
         self.errors   = []
-        self._proc    = self._start()
+        self._cleanup_dir = None
 
-    def _start(self) -> subprocess.Popen:
+        try:
+            self._mount_src, self._cleanup_dir = _prepare_bot_mount(bot_path)
+        except Exception as e:
+            self.errors.append("mount_prep_failed: " + str(e))
+            self._proc = None
+            return
+
+        self._proc = self._start()
+
+    def _start(self):
+        container_bot_py = "/bot/bot.py"
+
         if USE_DOCKER:
             cmd = [
                 "docker", "run",
-                "--rm",                          # delete container on exit
-                "-i",                            # keep stdin open
-                "--network", "none",             # no internet
-                "--memory",  "256m",             # OOM limit
-                "--memory-swap", "256m",         # no swap
-                "--cpus",    "0.5",              # half a core
-                "--read-only",                   # immutable filesystem
-                "--no-new-privileges",           # no privilege escalation
-                "--user",    "1000:1000",        # non-root
-                "--tmpfs",   "/tmp:size=10m",    # tiny writable tmp
-                "-v", f"{os.path.abspath(self.bot_path)}:/bot/bot.py:ro",
-                "-e", f"ACTION_TIMEOUT={ACTION_TIMEOUT}",
+                "--rm",
+                "-i",
+                "--network", "none",
+                "--memory",  CONTAINER_MEMORY,
+                "--memory-swap", CONTAINER_MEMORY,
+                "--cpus",    CONTAINER_CPUS,
+                "--read-only",
+                "--no-new-privileges",
+                "--user",    "1000:1000",
+                "--tmpfs",   "/tmp:size=" + CONTAINER_TMPFS_SIZE,
+                "-v",        self._mount_src + ":/bot:ro",
+                "-e",        "ACTION_TIMEOUT=" + str(ACTION_TIMEOUT),
+                "-e",        "BOT_PATH=" + container_bot_py,
+                "-e",        "BOT_DATA_DIR=/bot/data",
                 SANDBOX_IMAGE,
             ]
         else:
-            # Dev mode: plain subprocess, same runner.py
             cmd = [sys.executable, "-u", str(RUNNER_PATH)]
+
+        host_bot_py = os.path.join(self._mount_src, "bot.py")
+        env = {
+            **os.environ,
+            "BOT_PATH":       container_bot_py if USE_DOCKER else host_bot_py,
+            "BOT_DATA_DIR":   "/bot/data" if USE_DOCKER else os.path.join(self._mount_src, "data"),
+            "ACTION_TIMEOUT": str(ACTION_TIMEOUT),
+        }
 
         return subprocess.Popen(
             cmd,
@@ -69,12 +149,12 @@ class BotProcess:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**os.environ, "BOT_PATH": self.bot_path,
-                 "ACTION_TIMEOUT": str(ACTION_TIMEOUT)},
+            env=env,
         )
 
-    def act(self, game_state: dict) -> dict:
-        """Send state, get action. Returns fold on any failure."""
+    def act(self, game_state):
+        if self._proc is None:
+            return {"action": "fold", "error": "no_process"}
         try:
             self._proc.stdin.write(json.dumps(game_state) + "\n")
             self._proc.stdin.flush()
@@ -89,9 +169,10 @@ class BotProcess:
             self.errors.append(str(e))
             return {"action": "fold", "error": str(e)}
 
-    def stderr_lines(self) -> list:
-        """Non-blocking stderr drain for logging."""
+    def stderr_lines(self):
         lines = []
+        if self._proc is None:
+            return lines
         try:
             self._proc.stderr.flush()
         except Exception:
@@ -99,53 +180,50 @@ class BotProcess:
         return lines
 
     def stop(self):
-        try:
-            self._proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
+        if self._proc is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        if self._cleanup_dir and os.path.isdir(self._cleanup_dir):
+            shutil.rmtree(self._cleanup_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
 # Match runner
 # ---------------------------------------------------------------------------
 
-def run_match(
-    match_id: str,
-    bot_paths: dict,          # {bot_id: "/path/to/bot.py"}
-    n_hands: int = 200,
-    verbose: bool = False,
-    seed: int = None,         # set for deterministic/reproducible match
-) -> dict:
-    """
-    Run a complete match. Returns structured result dict with:
-      - final chip counts
-      - chip delta per bot (positive = profit)
-      - full hand-by-hand log
-    """
-    bot_ids  = list(bot_paths.keys())
-    n        = len(bot_ids)
-    assert 2 <= n <= 9, f"Need 2-9 bots, got {n}"
+def _inject_match_log(state, match_log):
+    if state.get("type") == "action_request":
+        state["match_action_log"] = match_log[-MATCH_LOG_MAX_ENTRIES:]
+    return state
 
-    procs    = {bid: BotProcess(bid, path) for bid, path in bot_paths.items()}
-    stacks   = {bid: STARTING_STACK for bid in bot_ids}
+
+def run_match(match_id, bot_paths, n_hands=200, verbose=False, seed=None):
+    bot_ids = list(bot_paths.keys())
+    n = len(bot_ids)
+    assert 2 <= n <= 9, "Need 2-9 bots, got " + str(n)
+
+    procs   = {bid: BotProcess(bid, path) for bid, path in bot_paths.items()}
+    stacks  = {bid: STARTING_STACK for bid in bot_ids}
     hand_log = []
-    dealer   = 0
+    match_action_log = []
+    dealer = 0
     start_ts = time.time()
 
     try:
         for hand_num in range(n_hands):
-            # Drop busted bots
             alive = [bid for bid in bot_ids if stacks[bid] > 0]
             if len(alive) < 2:
                 break
 
-            hand_id = f"{match_id}_h{hand_num:04d}"
+            hand_id = match_id + "_h" + str(hand_num).zfill(4)
             hand_seed = (seed * 1000003 + hand_num) if seed is not None else None
-            engine  = PokerEngine(
+            engine = PokerEngine(
                 hand_id        = hand_id,
                 bot_ids        = alive,
                 dealer_seat    = dealer % len(alive),
@@ -153,7 +231,7 @@ def run_match(
                 seed           = hand_seed,
             )
 
-            result  = _play_hand(engine, procs, alive, verbose)
+            result = _play_hand(engine, procs, alive, match_action_log, hand_num, verbose)
             hand_log.append({"hand_num": hand_num, "hand_id": hand_id, **result})
 
             for bid, s in result["final_stacks"].items():
@@ -180,9 +258,8 @@ def run_match(
     }
 
 
-def _play_hand(engine: PokerEngine, procs: dict,
-               active_bots: list, verbose: bool) -> dict:
-    state = engine.start_hand()
+def _play_hand(engine, procs, active_bots, match_action_log, hand_num, verbose):
+    state = _inject_match_log(engine.start_hand(), match_action_log)
     steps = 0
 
     while state.get("type") == "action_request":
@@ -191,23 +268,30 @@ def _play_hand(engine: PokerEngine, procs: dict,
         action = procs[bot_id].act(state)
 
         if verbose:
-            print(f"  [{bot_id}] {action}", file=sys.stderr)
+            print("  [" + bot_id + "] " + str(action), file=sys.stderr)
 
-        state  = engine.apply_action(seat, action)
+        match_action_log.append({
+            "hand_num": hand_num,
+            "seat":     seat,
+            "bot_id":   bot_id,
+            "action":   action.get("action"),
+            "amount":   action.get("amount"),
+        })
+
+        state = _inject_match_log(engine.apply_action(seat, action), match_action_log)
         steps += 1
 
         if steps > 1000:
-            # Should never happen — safety valve
-            raise RuntimeError(f"Hand exceeded 1000 steps: {engine.hand_id}")
+            raise RuntimeError("Hand exceeded 1000 steps: " + engine.hand_id)
 
     return state
 
 
-def _print_stacks(hand_num: int, total: int, stacks: dict):
-    print(f"\n  === Hand {hand_num}/{total} ===", file=sys.stderr)
+def _print_stacks(hand_num, total, stacks):
+    print("\n  === Hand " + str(hand_num) + "/" + str(total) + " ===", file=sys.stderr)
     for bid, s in sorted(stacks.items(), key=lambda x: -x[1]):
-        bar = "█" * (s // 1000)
-        print(f"  {bid:20s} {s:7,}  {bar}", file=sys.stderr)
+        bar = "X" * (s // 1000)
+        print("  " + bid.ljust(20) + " " + str(s).rjust(7) + "  " + bar, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -215,10 +299,11 @@ def _print_stacks(hand_num: int, total: int, stacks: dict):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import argparse, glob
+    import argparse
 
     parser = argparse.ArgumentParser(description="Run a Fullhouse match locally")
-    parser.add_argument("bots", nargs="+", help="Paths to bot.py files")
+    parser.add_argument("bots", nargs="+",
+                        help="Paths to bot.py files, bot directories, or bot.zip archives")
     parser.add_argument("--hands", type=int, default=200)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true", help="Output result as JSON (for worker)")
@@ -227,18 +312,21 @@ if __name__ == "__main__":
 
     paths = {}
     for i, path in enumerate(args.bots):
-        bot_id = Path(path).parent.name or f"bot_{i}"
-        paths[bot_id] = path
+        suffix = Path(path).suffix
+        if suffix in (".py", ".zip"):
+            bot_id = Path(path).stem
+        else:
+            bot_id = Path(path).name or "bot_" + str(i)
+        paths[bot_id or "bot_" + str(i)] = path
 
-    match_id = args.match_id or os.environ.get("MATCH_ID") or f"local_{uuid.uuid4().hex[:8]}"
+    match_id = args.match_id or os.environ.get("MATCH_ID") or "local_" + uuid.uuid4().hex[:8]
 
     if not args.json:
-        print(f"Starting match {match_id} with {len(paths)} bots, {args.hands} hands\n")
+        print("Starting match " + match_id + " with " + str(len(paths)) + " bots, " + str(args.hands) + " hands\n")
 
     result = run_match(match_id, paths, n_hands=args.hands, verbose=args.verbose)
 
     if args.json:
-        # Clean structured output for the worker to parse
         print(json.dumps({
             "match_id":     result["match_id"],
             "n_hands":      result["n_hands"],
@@ -249,18 +337,17 @@ if __name__ == "__main__":
         }))
         sys.exit(0)
 
-    print(f"\n{'='*50}")
-    print(f"Match complete in {result['duration_s']}s")
-    print(f"{'='*50}")
-    print(f"{'Bot':<25} {'Final Stack':>12} {'Delta':>10}")
+    print("\n" + "=" * 50)
+    print("Match complete in " + str(result["duration_s"]) + "s")
+    print("=" * 50)
+    print("Bot".ljust(25) + " " + "Final Stack".rjust(12) + " " + "Delta".rjust(10))
     print("-" * 50)
-    for bid in sorted(result["bot_ids"],
-                      key=lambda b: -result["final_stacks"][b]):
+    for bid in sorted(result["bot_ids"], key=lambda b: -result["final_stacks"][b]):
         delta = result["chip_delta"][bid]
         sign  = "+" if delta >= 0 else ""
-        print(f"{bid:<25} {result['final_stacks'][bid]:>12,} {sign}{delta:>9,}")
-    print(f"\nHands played: {result['n_hands']}")
+        print(bid.ljust(25) + " " + str(result["final_stacks"][bid]).rjust(12) + " " + sign + str(delta).rjust(9))
+    print("\nHands played: " + str(result["n_hands"]))
 
     errs = {b: e for b, e in result["bot_errors"].items() if e}
     if errs:
-        print(f"\nBot errors: {errs}")
+        print("\nBot errors: " + str(errs))

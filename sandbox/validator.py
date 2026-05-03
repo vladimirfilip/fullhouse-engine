@@ -20,13 +20,24 @@ Usage:
 import ast
 import importlib.util
 import json
+import os
+import shutil
 import signal
 import sys
+import tempfile
 import time
 import traceback
+import zipfile
 from pathlib import Path
 
 TIMEOUT_SECONDS = 2
+
+# Submission-time limits for the bot package.
+# Bumped May 2026 to support optional /bot/data/ payloads (CFR blueprints,
+# NN weights, lookup tables) loaded at module-import time.
+MAX_PACKAGE_SIZE_BYTES = 250 * 1024 * 1024   # 250 MB total (zip or dir)
+MAX_DATA_SIZE_BYTES    = 200 * 1024 * 1024   # 200 MB just for data/
+MAX_BOT_PY_SIZE_BYTES  =   5 * 1024 * 1024   # 5 MB for the .py file
 
 # Imports that are not allowed in submitted bots
 FORBIDDEN_MODULES = {
@@ -276,62 +287,160 @@ def run_test(bot_module, test: dict) -> dict:
 # Main validator
 # ---------------------------------------------------------------------------
 
-def validate(bot_path: str) -> dict:
+def _dir_size(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _resolve_submission(bot_path):
+    """Accepts a .py file, a directory, or a .zip archive.
+    Returns (bot_py_path, data_dir, cleanup_dir, package_errors).
+    cleanup_dir, if not None, must be rmtree'd by the caller after validation.
     """
-    Full validation of a bot.py file.
+    p = os.path.abspath(bot_path)
+    if not os.path.exists(p):
+        return None, None, None, ["File not found: " + bot_path]
+
+    cleanup_dir = None
+
+    # .zip archive: extract into tempdir, then treat as directory.
+    if os.path.isfile(p) and p.endswith(".zip"):
+        if os.path.getsize(p) > MAX_PACKAGE_SIZE_BYTES:
+            return None, None, None, [
+                "Archive exceeds " + str(MAX_PACKAGE_SIZE_BYTES // (1024*1024)) + " MB limit"
+            ]
+        cleanup_dir = tempfile.mkdtemp(prefix="fhval_")
+        try:
+            with zipfile.ZipFile(p) as zf:
+                for member in zf.infolist():
+                    name = member.filename
+                    if name.startswith("/") or "\\" in name:
+                        return None, None, cleanup_dir, ["Unsafe zip path (absolute or backslash): " + repr(name)]
+                    norm = os.path.normpath(os.path.join(cleanup_dir, name))
+                    if not norm.startswith(cleanup_dir + os.sep) and norm != cleanup_dir:
+                        return None, None, cleanup_dir, ["Unsafe zip path (traversal): " + repr(name)]
+                    if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                        return None, None, cleanup_dir, ["Unsafe zip entry (symlink): " + repr(name)]
+                zf.extractall(cleanup_dir)
+        except zipfile.BadZipFile as e:
+            return None, None, cleanup_dir, ["Invalid zip archive: " + str(e)]
+        p = cleanup_dir  # fall through
+
+    # Directory: must contain bot.py at root, optional data/ subdirectory.
+    if os.path.isdir(p):
+        bot_py = os.path.join(p, "bot.py")
+        data_dir = os.path.join(p, "data")
+        errors = []
+        if not os.path.isfile(bot_py):
+            errors.append("Submission must contain bot.py at the root")
+            return None, None, cleanup_dir, errors
+
+        # Forbid extra .py files at root and any symlinks
+        for entry in os.listdir(p):
+            full = os.path.join(p, entry)
+            if entry == "bot.py" or entry == "data":
+                continue
+            if entry.endswith(".py"):
+                errors.append("Only bot.py is allowed at the root: '" + entry + "' is forbidden")
+            if os.path.islink(full):
+                errors.append("Symlinks are not allowed: " + entry)
+
+        # data/ scan: forbid .py files inside, enforce size cap
+        if os.path.isdir(data_dir):
+            for root, _, files in os.walk(data_dir):
+                for fn in files:
+                    if fn.endswith(".py"):
+                        errors.append("data/ may not contain .py files: " + fn)
+                    fp = os.path.join(root, fn)
+                    if os.path.islink(fp):
+                        errors.append("Symlinks are not allowed: data/" + fn)
+            data_size = _dir_size(data_dir)
+            if data_size > MAX_DATA_SIZE_BYTES:
+                errors.append(
+                    "data/ exceeds " + str(MAX_DATA_SIZE_BYTES // (1024*1024)) +
+                    " MB limit (got " + str(data_size // (1024*1024)) + " MB)"
+                )
+
+        if _dir_size(p) > MAX_PACKAGE_SIZE_BYTES:
+            errors.append(
+                "Submission exceeds " + str(MAX_PACKAGE_SIZE_BYTES // (1024*1024)) + " MB limit"
+            )
+
+        if os.path.getsize(bot_py) > MAX_BOT_PY_SIZE_BYTES:
+            errors.append("bot.py exceeds " + str(MAX_BOT_PY_SIZE_BYTES // (1024*1024)) + " MB limit")
+
+        return bot_py, (data_dir if os.path.isdir(data_dir) else None), cleanup_dir, errors
+
+    # Plain .py (legacy)
+    if os.path.isfile(p) and p.endswith(".py"):
+        if os.path.getsize(p) > MAX_BOT_PY_SIZE_BYTES:
+            return None, None, None, ["bot.py exceeds " + str(MAX_BOT_PY_SIZE_BYTES // (1024*1024)) + " MB limit"]
+        return p, None, None, []
+
+    return None, None, cleanup_dir, ["Unsupported submission (must be .py, .zip, or directory): " + bot_path]
+
+
+def validate(bot_path):
+    """Full validation of a bot submission (.py file, directory, or .zip).
     Returns a result dict with passed/failed status and details.
     """
-    path = Path(bot_path)
     results = {
-        "bot_path": str(path),
+        "bot_path": str(bot_path),
         "passed":   False,
         "errors":   [],
         "warnings": [],
         "tests":    [],
+        "data_dir": None,
     }
 
-    # 1. File exists
-    if not path.exists():
-        results["errors"].append(f"File not found: {bot_path}")
-        return results
-
-    if path.suffix != ".py":
-        results["errors"].append("Bot file must be a .py file")
-        return results
-
-    # 2. Static analysis
-    static_issues = check_static(str(path))
-    for issue in static_issues:
-        if issue["level"] == "error":
-            results["errors"].append(issue["message"])
-        else:
-            results["warnings"].append(issue["message"])
-
-    if results["errors"]:
-        return results
-
-    # 3. Load bot
+    bot_py, data_dir, cleanup_dir, package_errors = _resolve_submission(bot_path)
     try:
-        bot = load_bot(str(path))
-    except Exception:
-        results["errors"].append(f"Failed to load bot: {traceback.format_exc().strip()}")
+        if package_errors:
+            results["errors"].extend(package_errors)
+            if not bot_py:
+                return results
+        results["data_dir"] = data_dir
+
+        static_issues = check_static(bot_py)
+        for issue in static_issues:
+            if issue["level"] == "error":
+                results["errors"].append(issue["message"])
+            else:
+                results["warnings"].append(issue["message"])
+
+        if results["errors"]:
+            return results
+
+        try:
+            bot = load_bot(bot_py)
+        except Exception:
+            results["errors"].append("Failed to load bot: " + traceback.format_exc().strip())
+            return results
+
+        if not hasattr(bot, "decide") or not callable(bot.decide):
+            results["errors"].append("decide() function not found or not callable")
+            return results
+
+        all_passed = True
+        for test in TEST_STATES:
+            r = run_test(bot, test)
+            results["tests"].append(r)
+            if not r["passed"]:
+                results["errors"].append("Test '" + r["test"] + "' failed: " + str(r.get("error", "")))
+                all_passed = False
+
+        results["passed"] = all_passed and not results["errors"]
         return results
+    finally:
+        if cleanup_dir and os.path.isdir(cleanup_dir):
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
-    if not hasattr(bot, "decide") or not callable(bot.decide):
-        results["errors"].append("decide() function not found or not callable")
-        return results
-
-    # 4. Runtime tests
-    all_passed = True
-    for test in TEST_STATES:
-        r = run_test(bot, test)
-        results["tests"].append(r)
-        if not r["passed"]:
-            results["errors"].append(f"Test '{r['test']}' failed: {r.get('error', '')}")
-            all_passed = False
-
-    results["passed"] = all_passed and not results["errors"]
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +449,8 @@ def validate(bot_path: str) -> dict:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Validate a Fullhouse bot.py")
-    parser.add_argument("bot_path", help="Path to bot.py")
+    parser = argparse.ArgumentParser(description="Validate a Fullhouse bot submission")
+    parser.add_argument("bot_path", help="Path to bot.py, bot directory, or bot.zip")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 

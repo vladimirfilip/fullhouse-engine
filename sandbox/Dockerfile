@@ -3,7 +3,7 @@
 #
 # Security properties enforced at runtime (see match.py docker run call):
 #   --network none          no internet access
-#   --memory 256m           OOM-killed if exceeded
+#   --memory 768m           OOM-killed if exceeded (was 256m, bumped May 2026)
 #   --cpus 0.5              half a core max
 #   --read-only             filesystem is read-only
 #   --no-new-privileges     can't escalate permissions
