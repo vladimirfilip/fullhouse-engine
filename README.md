@@ -80,6 +80,21 @@ Invalid or missing actions default to fold. Raises below the minimum are snapped
 
 **Available libraries:** `eval7` `numpy` `scipy` `treys` `scikit-learn` — request others before the event
 
+### Not allowed (will get your bot disqualified)
+
+The sandbox blocks most of these at the OS level — but listing them explicitly so there's no ambiguity:
+
+- **No external API calls of any kind.** No `requests` to Claude, OpenAI, Anthropic, Google, or any other LLM/AI service. No webhook callbacks, no DNS lookups, no `socket`. The container has `--network none` so these fail anyway, but doing them on purpose is grounds for disqualification.
+- **No reading another bot's code or hole cards.** You only see what's in `state["your_cards"]`. Don't try to access opponents' files, scrape `/proc`, or use reflection to peek at the runner's memory. The hole-card data isn't in your container's process memory — but trying counts as cheating.
+- **No file writes during gameplay.** The filesystem is read-only at runtime. `data/` is read-only too. Trying to `os.system`, `subprocess`, or `open(..., "w")` will be blocked or get you DQ'd.
+- **No threading or async tricks to dodge the 2 s/action timeout.** The signal-based timer cancels your `decide()` mid-call; spawning background threads to keep computing past the deadline counts as fraud, not strategy.
+- **No collusion.** If you and a friend both register, your bots must play independently. Coordinated soft-play, chip-dumping, or sharing live game state between submissions is grounds for both bots being DQ'd and forfeit of any prize.
+- **No crypto-mining or resource abuse.** The 768 MB / 0.5 CPU limits will OOM-kill abusive bots, but doing it on purpose (e.g., to slow opponents) is bannable.
+- **No reflection escape attempts.** `__import__('socket')`, `getattr(__builtins__, 'open')`, `eval()`, `exec()`, `compile()` are all flagged by the validator and rejected. Don't try clever obfuscation either — `__import__('so'+'cket')` etc. fails the AST check at submission time.
+- **No external compute.** You may not use the bot.py to call out to a server you control (it can't anyway, see point 1) or queue work to be done elsewhere. The bot must make its own decisions inside its own container.
+
+**TL;DR:** treat your container as if it's the entire universe. If it's not in `requirements.txt` or the Python stdlib, and you can't load it from your own `data/` at import time, it doesn't exist.
+
 ### Submission formats
 
 Pick whichever fits your bot:

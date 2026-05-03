@@ -7,9 +7,20 @@
 RULES:
   - Implement the decide() function below. That's it.
   - You may import any stdlib module and any library in requirements.txt
-  - You may NOT make network calls or read/write files DURING gameplay
   - You have 2 seconds to return an action or you auto-fold
   - If your function crashes, it auto-folds for that hand
+
+NOT ALLOWED (will DQ your bot):
+  - External API calls: no Claude/OpenAI/Anthropic/Google/any HTTP. Network is
+    blocked at the container level; trying anyway is a DQ.
+  - File writes during gameplay; data/ is read-only and only at import time.
+  - subprocess / os.system / shell commands.
+  - Threading or async tricks to dodge the 2s/action signal timer.
+  - Reflection: __import__('socket'), getattr(__builtins__, 'open'),
+    eval(), exec(), compile() — all flagged by the validator.
+  - Collusion between bots you've registered with friends — bots must play
+    independently; coordinated soft-play or chip-dumping = both DQ'd.
+  - Reading other bots' code or hole cards (you can't anyway, but trying = DQ).
 
 OPTIONAL DATA FILES (NEW):
   Submit a .zip archive containing:
