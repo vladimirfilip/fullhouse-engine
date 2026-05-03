@@ -39,15 +39,47 @@ MAX_PACKAGE_SIZE_BYTES = 250 * 1024 * 1024   # 250 MB total (zip or dir)
 MAX_DATA_SIZE_BYTES    = 200 * 1024 * 1024   # 200 MB just for data/
 MAX_BOT_PY_SIZE_BYTES  =   5 * 1024 * 1024   # 5 MB for the .py file
 
-# Imports that are not allowed in submitted bots
+# Imports that are not allowed in submitted bots.
+# NOTE: `os` is NOT here — bots are expected to use `os.path.dirname(__file__)`
+# and `os.path.join` to load files from a sibling data/ dir at import time.
+# Dangerous os calls (os.system, os.popen, os.exec*) are caught by the call-
+# pattern check below. Network/filesystem are also blocked at container level
+# (--network none, --read-only).
 FORBIDDEN_MODULES = {
     "socket", "urllib", "urllib2", "urllib3", "requests", "httpx", "aiohttp",
     "http", "ftplib", "smtplib", "telnetlib", "xmlrpc",
-    "subprocess", "multiprocessing", "os",
-    "open", "builtins.open",
+    "subprocess", "multiprocessing",
     "pickle", "shelve",
     "threading",                     # allow for complex strategies but flag
+    "ctypes",                        # FFI, can call libc
+    "runpy", "importlib",            # dynamic imports
 }
+
+# Specific call patterns banned even if their module is allowed.
+# Matched as substrings against the source — intentionally aggressive.
+FORBIDDEN_CALL_PATTERNS = [
+    "os.system",
+    "os.popen",
+    "os.exec",
+    "os.spawn",
+    "os.fork",
+    "os.kill",
+    "os.remove",
+    "os.unlink",
+    "os.rmdir",
+    "os.removedirs",
+    "os.chmod",
+    "os.chown",
+    "os.replace",
+    "os.rename",
+    "__import__(",
+    "getattr(__builtins__",
+    "eval(",
+    "exec(",
+    "compile(",
+    "globals()[",
+    "locals()[",
+]
 
 # A set of realistic game states to test against
 TEST_STATES = [
@@ -199,6 +231,69 @@ def check_static(path: str) -> list:
                         "message": f"Forbidden import: '{name}' — bots may not use network, "
                                    f"filesystem, or subprocess modules.",
                     })
+
+    # Banned call/attribute patterns — catches __import__('os'), eval(...),
+    # os.system, getattr-on-builtins tricks, etc. We scan the AST (not raw
+    # source) so docstrings/comments mentioning these names don't false-flag.
+    BANNED_CALL_NAMES = {"__import__", "eval", "exec", "compile"}
+    BANNED_OS_FUNCS = {
+        "system", "popen", "execv", "execve", "execvp", "execvpe",
+        "execl", "execle", "execlp", "execlpe",
+        "spawn", "spawnv", "spawnve", "spawnvp",
+        "fork", "kill", "remove", "unlink", "rmdir", "removedirs",
+        "chmod", "chown", "replace", "rename",
+    }
+
+    def _attr_chain(node):
+        # Returns dotted name e.g. "os.system" or "" if not a plain attribute chain
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+            return ".".join(reversed(parts))
+        return ""
+
+    for node in ast.walk(tree):
+        # Direct calls to banned builtins: __import__(...), eval(...), exec(...), compile(...)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in BANNED_CALL_NAMES:
+            warnings.append({
+                "level": "error",
+                "check": "forbidden_call",
+                "message": f"Forbidden call: '{node.func.id}(...)' — see README \"Not allowed\".",
+            })
+        # Attribute calls: os.system(...), os.popen(...), etc.
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            chain = _attr_chain(node.func)
+            if chain.startswith("os.") and chain.split(".")[1] in BANNED_OS_FUNCS:
+                warnings.append({
+                    "level": "error",
+                    "check": "forbidden_call",
+                    "message": f"Forbidden call: '{chain}(...)' — see README \"Not allowed\".",
+                })
+            # subprocess.* (already banned at import) — defence in depth
+            if chain.startswith("subprocess."):
+                warnings.append({
+                    "level": "error",
+                    "check": "forbidden_call",
+                    "message": f"Forbidden call: '{chain}(...)' — bots may not spawn processes.",
+                })
+        # getattr(__builtins__, ...) tricks
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == "__builtins__":
+                warnings.append({
+                    "level": "error",
+                    "check": "forbidden_call",
+                    "message": "Forbidden: getattr(__builtins__, ...) — reflection escape attempt.",
+                })
+        # __builtins__["..."] indexing
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "__builtins__":
+            warnings.append({
+                "level": "error",
+                "check": "forbidden_call",
+                "message": "Forbidden: __builtins__[...] — reflection escape attempt.",
+            })
 
     # Check decide() exists
     has_decide = any(

@@ -26,11 +26,20 @@ The engine calls `decide()` once per action. You get the full game state — you
 ```bash
 git clone https://github.com/uzlez/fullhouse-engine
 cd fullhouse-engine
-pip3 install eval7 flask
+
+# eval7 needs Cython<3 at build time and won't pick it up via build isolation
+pip3 install "Cython<3"
+pip3 install --no-build-isolation eval7==0.1.7
+pip3 install flask numpy scipy treys scikit-learn
+
 python3 demo.py
 ```
 
 Open `http://localhost:5000` — you'll see 6 reference bots playing each other live with a real-time leaderboard and hand replay.
+
+> Hitting a build error on `eval7`? You're not alone — modern pip's build
+> isolation breaks it. The two-step install above is the workaround. We have
+> a `Makefile` target too: `make install`.
 
 ---
 
