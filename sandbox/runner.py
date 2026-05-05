@@ -11,8 +11,9 @@ import traceback
 import signal
 import os
 
-BOT_PATH = os.environ.get("BOT_PATH", "/bot/bot.py")
-TIMEOUT  = int(os.environ.get("ACTION_TIMEOUT", "2"))
+BOT_PATH        = os.environ.get("BOT_PATH", "/bot/bot.py")
+TIMEOUT         = int(os.environ.get("ACTION_TIMEOUT", "2"))
+WARMUP_TIMEOUT  = int(os.environ.get("WARMUP_TIMEOUT", "30"))
 
 
 def load_bot(path: str):
@@ -54,19 +55,35 @@ def main():
             emit({"action": "fold", "error": "bad_json"})
             continue
 
-        signal.alarm(TIMEOUT)
+        # Warm-up: one-shot call before hand 1 with a longer alarm so bots
+        # loading CFR blueprints / NN weights don't get killed at 2 s.
+        # We don't penalise warmup errors — failure here just means hand 1
+        # will run with whatever's loaded.
+        is_warmup = state.get("type") == "warmup"
+        signal.alarm(WARMUP_TIMEOUT if is_warmup else TIMEOUT)
         try:
             action = bot.decide(state)
             signal.alarm(0)
+            if is_warmup:
+                emit({"ok": True})
+                continue
             if not isinstance(action, dict) or "action" not in action:
                 raise ValueError("decide() must return dict with 'action' key")
             emit(action)
         except TimeoutError:
             signal.alarm(0)
+            if is_warmup:
+                sys.stderr.write("[runner] WARMUP TIMEOUT\n")
+                emit({"ok": False, "error": "warmup_timeout"})
+                continue
             sys.stderr.write("[runner] TIMEOUT\n")
             emit({"action": "fold", "error": "timeout"})
         except Exception:
             signal.alarm(0)
+            if is_warmup:
+                sys.stderr.write(f"[runner] WARMUP EXCEPTION:\n{traceback.format_exc()}\n")
+                emit({"ok": False, "error": "warmup_exception"})
+                continue
             sys.stderr.write(f"[runner] BOT EXCEPTION:\n{traceback.format_exc()}\n")
             emit({"action": "fold", "error": "exception"})
 

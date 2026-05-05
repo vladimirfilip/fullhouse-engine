@@ -169,6 +169,25 @@ class BotProcess:
             self.errors.append(str(e))
             return {"action": "fold", "error": str(e)}
 
+    def warmup(self):
+        """One-shot 'wake up the bot before hand 1' call.
+
+        Bots that load CFR blueprints, NN weights, or large lookup tables
+        at module-import time can take 10-30s to do their first decision.
+        Without this they would blow through the 2s/action timeout on
+        hand 1 and auto-fold for free. The runner gives this call a
+        longer alarm (see WARMUP_TIMEOUT in runner.py) and we discard
+        the response — its only purpose is to let imports finish.
+        """
+        if self._proc is None:
+            return
+        try:
+            self._proc.stdin.write(json.dumps({"type": "warmup"}) + "\n")
+            self._proc.stdin.flush()
+            self._proc.stdout.readline()  # discard
+        except Exception as e:
+            self.errors.append("warmup_failed: " + str(e))
+
     def stderr_lines(self):
         lines = []
         if self._proc is None:
@@ -215,6 +234,11 @@ def run_match(match_id, bot_paths, n_hands=400, verbose=False, seed=None):
     dealer = 0
     start_ts = time.time()
 
+    # Warm-up: give every bot one untimed-by-2s call so they can finish
+    # heavy imports / lookup-table loads before hand 1.
+    for p in procs.values():
+        p.warmup()
+
     try:
         for hand_num in range(n_hands):
             alive = [bid for bid in bot_ids if stacks[bid] > 0]
@@ -249,6 +273,7 @@ def run_match(match_id, bot_paths, n_hands=400, verbose=False, seed=None):
     return {
         "match_id":     match_id,
         "bot_ids":      bot_ids,
+        "seed":         seed,
         "n_hands":      len(hand_log),
         "duration_s":   round(time.time() - start_ts, 2),
         "final_stacks": stacks,
@@ -308,15 +333,23 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true", help="Output result as JSON (for worker)")
     parser.add_argument("--match-id", default=None)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Deterministic seed — same seed + same bots = same cards. Useful for reproducing a match locally.")
     args = parser.parse_args()
 
     paths = {}
     for i, path in enumerate(args.bots):
-        suffix = Path(path).suffix
+        pp = Path(path)
+        suffix = pp.suffix
+        # Default bot_id from filename, but if it would collide (very common
+        # with the "bots/<name>/bot.py" layout where every stem is "bot"),
+        # fall back to the parent directory name.
         if suffix in (".py", ".zip"):
-            bot_id = Path(path).stem
+            bot_id = pp.stem
         else:
-            bot_id = Path(path).name or "bot_" + str(i)
+            bot_id = pp.name or "bot_" + str(i)
+        if bot_id in paths or bot_id in ("bot",):
+            bot_id = pp.parent.name or ("bot_" + str(i))
         paths[bot_id or "bot_" + str(i)] = path
 
     match_id = args.match_id or os.environ.get("MATCH_ID") or "local_" + uuid.uuid4().hex[:8]
@@ -324,11 +357,12 @@ if __name__ == "__main__":
     if not args.json:
         print("Starting match " + match_id + " with " + str(len(paths)) + " bots, " + str(args.hands) + " hands\n")
 
-    result = run_match(match_id, paths, n_hands=args.hands, verbose=args.verbose)
+    result = run_match(match_id, paths, n_hands=args.hands, verbose=args.verbose, seed=args.seed)
 
     if args.json:
         print(json.dumps({
             "match_id":     result["match_id"],
+            "seed":         result["seed"],
             "n_hands":      result["n_hands"],
             "duration_s":   result["duration_s"],
             "final_stacks": result["final_stacks"],
