@@ -135,8 +135,8 @@ def decide(state):
 ## Running matches
 
 ```bash
-# single match, 200 hands
-python3 sandbox/match.py bots/mybot/bot.py bots/shark/bot.py --hands 200
+# single match, 400 hands (qualifier length)
+python3 sandbox/match.py bots/mybot/bot.py bots/shark/bot.py --hands 400
 
 # full tournament simulation (3 Swiss rounds)
 # use the demo UI at http://localhost:5000
@@ -146,14 +146,16 @@ python3 sandbox/match.py bots/mybot/bot.py bots/shark/bot.py --hands 200
 
 ## Tournament format
 
-**Day 1 — Qualification**
-All bots play in a Swiss-system tournament (3 rounds, 200 hands each). Bots are paired by similar standing after each round. Top 32 qualify.
+**1 Jun — Online qualifier**
+All bots play in a Swiss-system tournament (multiple rounds, 400 hands per match, 6-bot tables). Bots are paired by similar standing after each round. Ranking is by cumulative chip delta. **Top 64 advance** to the finals.
 
-**Day 2 — Patch window + second qualifier**
-Submit an updated bot. Second qualification round runs. Standings update.
+**2 Jun — Patch window**
+Hand histories from your D1 matches are downloadable as JSON. You can submit one updated bot before D5.
 
-**Day 3 — The Finale**
-Top 32 bots, live-streamed bracket. Winner takes the prize pool.
+**5 Jun — Finals night, UCL East**
+Top 64 play a single-elimination bracket live on stage. Winner takes the prize pool.
+
+> **Why 400 hands?** Lower variance per match. With only 200 hands, "overbet a lot" can be +EV in tournament terms (you can lose −10k max but gain up to +50k, and only top 64 advance). 400 hands tilts the field back toward skill.
 
 ---
 

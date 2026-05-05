@@ -203,7 +203,7 @@ def _inject_match_log(state, match_log):
     return state
 
 
-def run_match(match_id, bot_paths, n_hands=200, verbose=False, seed=None):
+def run_match(match_id, bot_paths, n_hands=400, verbose=False, seed=None):
     bot_ids = list(bot_paths.keys())
     n = len(bot_ids)
     assert 2 <= n <= 9, "Need 2-9 bots, got " + str(n)
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a Fullhouse match locally")
     parser.add_argument("bots", nargs="+",
                         help="Paths to bot.py files, bot directories, or bot.zip archives")
-    parser.add_argument("--hands", type=int, default=200)
+    parser.add_argument("--hands", type=int, default=400)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true", help="Output result as JSON (for worker)")
     parser.add_argument("--match-id", default=None)
