@@ -22,7 +22,7 @@ import importlib.util
 import json
 import os
 import shutil
-import signal
+import threading
 import sys
 import tempfile
 import time
@@ -314,8 +314,31 @@ def check_static(path: str) -> list:
 # Runtime checks
 # ---------------------------------------------------------------------------
 
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Bot exceeded time limit")
+class _BotTimeout(Exception):
+    """Raised when a bot's decide() doesn't return inside TIMEOUT_SECONDS.
+    Cross-platform replacement for signal.SIGALRM (Unix-only)."""
+
+
+def _call_with_timeout(fn, arg, timeout_s):
+    """Run fn(arg) on a daemon thread, wait up to timeout_s, return its
+    result. Raises _BotTimeout on timeout, re-raises whatever fn raised."""
+    box = {"value": None, "error": None}
+    done = threading.Event()
+
+    def _worker():
+        try:
+            box["value"] = fn(arg)
+        except BaseException as e:
+            box["error"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    if not done.wait(timeout_s):
+        raise _BotTimeout()
+    if box["error"] is not None:
+        raise box["error"]
+    return box["value"]
 
 
 def load_bot(path: str):
@@ -330,14 +353,10 @@ def run_test(bot_module, test: dict) -> dict:
     state  = test["state"]
     start  = time.time()
 
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(TIMEOUT_SECONDS)
     try:
-        result = bot_module.decide(state)
-        signal.alarm(0)
+        result  = _call_with_timeout(bot_module.decide, state, TIMEOUT_SECONDS)
         elapsed = time.time() - start
-    except TimeoutError:
-        signal.alarm(0)
+    except _BotTimeout:
         return {
             "test":    test["name"],
             "passed":  False,
@@ -345,7 +364,6 @@ def run_test(bot_module, test: dict) -> dict:
             "elapsed": TIMEOUT_SECONDS,
         }
     except Exception:
-        signal.alarm(0)
         return {
             "test":    test["name"],
             "passed":  False,
