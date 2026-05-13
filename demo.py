@@ -27,6 +27,7 @@ BOT_PATHS = {
     "Template Bot A":   "bots/template/bot.py",
     "Pot-Odds Bot B":   "bots/ref_bot_2/bot.py",
     "Template Bot C":   "bots/template/bot.py",
+    "Vlad Bot": "bots/vlad/bot.py",
 }
 
 state = {
