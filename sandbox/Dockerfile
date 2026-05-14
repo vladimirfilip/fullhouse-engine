@@ -20,13 +20,17 @@ FROM python:3.11-slim
 # install Cython<3 into the actual build env, then install eval7 with
 # --no-build-isolation so it can see Cython. Everything else after that
 # installs the normal way.
-RUN pip install --no-cache-dir "Cython<3" \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && pip install --no-cache-dir "Cython<3" \
  && pip install --no-cache-dir --no-build-isolation eval7==0.1.7 \
  && pip install --no-cache-dir \
     numpy==1.26.4 \
     scipy==1.13.0 \
     treys==0.1.8 \
-    scikit-learn==1.5.2
+    scikit-learn==1.5.2 \
+ && apt-get purge -y --auto-remove gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd -u 1000 -m botuser
