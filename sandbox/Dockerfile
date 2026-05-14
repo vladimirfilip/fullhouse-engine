@@ -9,7 +9,12 @@
 #   --no-new-privileges     can't escalate permissions
 #   --user 1000:1000        non-root
 
-FROM python:3.11-slim
+# Python 3.10 (not 3.11+) — eval7 0.1.7's pre-generated C files reference
+# longintrepr.h, which Python 3.11 moved from Include/ to Include/cpython/.
+# eval7 was last released for 3.7-3.10; building on 3.11+ fails with
+# 'longintrepr.h: No such file or directory'. 3.10 is fully supported by
+# every other dep we ship (numpy, scipy, treys, sklearn).
+FROM python:3.10-slim
 
 # Install only what bots are allowed to use.
 # Participants can request additions via [library-request] GitHub issues — we
