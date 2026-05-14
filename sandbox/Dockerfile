@@ -11,10 +11,18 @@
 
 FROM python:3.11-slim
 
-# Install only what bots are allowed to use
-# Participants can request additions via requirements.txt — we vet and rebuild
-RUN pip install --no-cache-dir \
-    eval7==0.1.7 \
+# Install only what bots are allowed to use.
+# Participants can request additions via [library-request] GitHub issues — we
+# vet and rebuild the image once before D1.
+#
+# eval7 quirk: its setup.py imports Cython at the top, so pip's default build
+# isolation (which spins up an empty venv) breaks the install. Two-step:
+# install Cython<3 into the actual build env, then install eval7 with
+# --no-build-isolation so it can see Cython. Everything else after that
+# installs the normal way.
+RUN pip install --no-cache-dir "Cython<3" \
+ && pip install --no-cache-dir --no-build-isolation eval7==0.1.7 \
+ && pip install --no-cache-dir \
     numpy==1.26.4 \
     scipy==1.13.0 \
     treys==0.1.8 \
