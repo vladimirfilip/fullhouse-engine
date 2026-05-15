@@ -293,6 +293,7 @@ def _play_hand(engine, procs, active_bots, match_action_log, hand_num, verbose):
         action = procs[bot_id].act(state)
 
         if verbose:
+            # print("STATE: " + json.dumps(state, indent=2), file=sys.stderr)
             print("  [" + bot_id + "] " + str(action), file=sys.stderr)
 
         match_action_log.append({

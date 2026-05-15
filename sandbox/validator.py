@@ -178,7 +178,7 @@ TEST_STATES = [
             "community_cards": [],
             "current_bet": 100,
             "min_raise_to": 200,
-            "amount_owed": 100,
+            "amount_owed": 80,
             "can_check": False,
             "your_cards": ["Qh", "Qs"],
             "your_stack": 80,
@@ -209,6 +209,7 @@ def check_static(path: str) -> list:
     Returns list of warning dicts.
     """
     warnings = []
+    print(path)
     source = Path(path).read_text()
 
     try:

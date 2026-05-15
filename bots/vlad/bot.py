@@ -1,8 +1,4 @@
 """
-╔══════════════════════════════════════════════════════════════╗
-║         FULLHOUSE HACKATHON — BOT TEMPLATE v1.0             ║
-║         No-Limit Texas Hold'em, 6-max                        ║
-╚══════════════════════════════════════════════════════════════╝
 
 RULES:
   - Implement the decide() function below. That's it.
@@ -60,19 +56,15 @@ RETURN FORMAT:
 import random
 import time
 
-import eval7
-from eval7 import evaluate
+from eval7 import Card, evaluate
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-BOT_NAME = "The House"          # Show name on the leaderboard
-BOT_AVATAR = "robot_1"         # Chosen in the portal, not here
-RANKS = "23456789TJKA"
+BOT_NAME = "The House"  # Show name on the leaderboard
+BOT_AVATAR = "robot_1"  # Chosen in the portal, not here
+RANKS = "23456789TJQKA"
 SUITS = "shdc"
-ALL_CARDS = [r + s for r in RANKS for s in SUITS]
-
-OPPONENT_PROFILES = dict()
-
+ALL_CARDS = [Card(r + s) for r in RANKS for s in SUITS]
 
 def decide(game_state: dict) -> dict:
     """
@@ -100,101 +92,26 @@ def decide(game_state: dict) -> dict:
 
     # ── Your strategy goes here ───────────────────────────────────────────────
 
-    my_cards: list[str] = game_state["your_cards"]
-    board_cards: list[str] = game_state["community_cards"]
+    my_cards: list[Card] = list(map(Card, game_state["your_cards"]))
+    board_cards: list[Card] = list(map(Card, game_state["community_cards"]))
     rest_cards = [card for card in ALL_CARDS if card not in my_cards and card not in board_cards]
     amount_owed: int = game_state['amount_owed']
+    assert amount_owed == game_state["current_bet"] - game_state["your_bet_this_street"], \
+        f"amount_owed: {amount_owed}, current_bet: {game_state['current_bet']}, your_bet_this_street: {game_state['your_bet_this_street']}"
     pot: int = game_state["pot"]
     my_stack: int = game_state["your_stack"]
     street: str = game_state["street"]
     active_players = sum(player["state"] == "active" for player in game_state["players"])
     assert active_players >= 2
 
-    update_opponent_profiles(game_state)
-
-    equity = monte_carlo_equity(my_cards, board_cards, rest_cards, num_opponents=active_players - 1)
-    current_bet = game_state["current_bet"]
-    pot_odds = current_bet / (pot + current_bet)
-    if equity > pot_odds:
-        return {"action": "call"}
-
-    if game_state["can_check"]:
-        return {"action": "check"}
-
-    return {"action": "fold"}
-
-    if active_players == 2:
-        return one_on_one(game_state)
-    elif street == "preflop":
-        return preflop(game_state)
-    return gto(game_state)
-
-
-    # Pocket aces or kings — raise big
-    ranks = [c[0] for c in my_cards]
-    if ranks.count("A") == 2 or ranks.count("K") == 2:
-        raise_to = min(pot * 3, my_stack + game_state["your_bet_this_street"])
-        raise_to = max(raise_to, game_state["min_raise_to"])
-        return {"action": "raise", "amount": raise_to}
-
-    # Free check — always take it
-    if game_state["can_check"]:
-        return {"action": "check"}
-
-    # Small price to call — call
-    if amount_owed < pot * 0.25:
-        return {"action": "call"}
-
-    # Otherwise fold
-    return {"action": "fold"}
-
+    # print(game_state)
+    equity = monte_carlo_equity(my_cards, board_cards, rest_cards, active_players - 1)
+    return choose_action(equity, pot, amount_owed, game_state["your_bet_this_street"], game_state["min_raise_to"], my_stack, active_players)
     # ─────────────────────────────────────────────────────────────────────────
 
-def one_on_one(game_state: dict) -> dict:
-    return dict()
 
-def gto(game_state: dict) -> dict:
-    return dict()
-
-# Given the game_state, described in topmost comment
-# update OPPONENT_PROFILES such that it maps bot_id to a dict storing
-# cumulative behaviour characteristics such as VPIP, AggFreq, etc.
-def update_opponent_profiles(game_state: dict):
-    """
-    Track opponent behavior: VPIP (Voluntarily Put In Pot), aggression frequency, etc.
-    """
-    action_log = game_state.get("action_log", [])
-
-    for action in action_log:
-        bot_id = action.get("bot_id")
-        if bot_id is None or bot_id == game_state.get("seat_to_act"):
-            continue  # Skip if no bot_id or if it's us
-
-        OPPONENT_PROFILES[bot_id] = {
-            "hands_seen": 0,
-            "vpip_count": 0,
-            "raise_count": 0,
-            "call_count": 0,
-            "fold_count": 0,
-            "check_count": 0,
-        }
-
-        profile = OPPONENT_PROFILES[bot_id]
-        action_type = action.get("action")
-
-        # Track action
-        if action_type == "raise" or action_type == "all_in":
-            profile["raise_count"] += 1
-            profile["vpip_count"] += 1
-        elif action_type == "call":
-            profile["call_count"] += 1
-            profile["vpip_count"] += 1
-        elif action_type == "check":
-            profile["check_count"] += 1
-        elif action_type == "fold":
-            profile["fold_count"] += 1
-
-def monte_carlo_equity(hole_cards: list[str], board_cards: list[str], remaining_cards: list[str], num_opponents=1, time_limit=0.1) -> float:
+def monte_carlo_equity(hole_cards: list[str], board_cards: list[str], remaining_cards: list[str], num_opponents=1,
+        time_limit=0.5) -> float:
     start_time = time.time()
     wins = 0
     iterations = 0
@@ -209,8 +126,8 @@ def monte_carlo_equity(hole_cards: list[str], board_cards: list[str], remaining_
         for i in range(5 - len(board_cards)):
             full_board_cards.append(remaining_cards[2 * num_opponents + i])
 
-        player_score = evaluate_cards(hole_cards + full_board_cards)
-        opponent_scores = [evaluate_cards(opp_hole + full_board_cards) for opp_hole in opponent_hole_cards]
+        player_score = evaluate(hole_cards + full_board_cards)
+        opponent_scores = [evaluate(opp_hole + full_board_cards) for opp_hole in opponent_hole_cards]
         best_score = max(player_score, max(opponent_scores))
 
         N = opponent_scores.count(best_score)
@@ -222,6 +139,26 @@ def monte_carlo_equity(hole_cards: list[str], board_cards: list[str], remaining_
     return wins / iterations
 
 
-def evaluate_cards(cards: list[str]):
-    return evaluate(list(map(lambda s : eval7.Card(s), cards)))
+def choose_action(mc_equity, pot, amount_owed, already_bet, min_raise_to, your_stack, n_players):
+    buffer = 0.1 if n_players == 2 else (0.15 if n_players <= 4 else 0.3)
+    required_equity = amount_owed / (pot + amount_owed) if amount_owed > 0 else 0
 
+    if mc_equity < required_equity + buffer:
+        if amount_owed == 0:
+            return {"action": "check"}
+        return {"action": "fold"}
+    elif mc_equity > 0.80 or mc_equity > required_equity + buffer + 0.15:
+        all_chips = already_bet + your_stack
+        if all_chips < pot * 2:  # short stack, just go all-in
+            return {"action": "all_in"}
+        else:
+            raise_amount = max(min_raise_to, already_bet + amount_owed)
+            raise_amount = min(raise_amount, all_chips)
+            if raise_amount == all_chips:
+                return {"action": "all_in"}
+            return {"action": "raise", "amount": raise_amount}
+    else:
+        if amount_owed == 0:
+            return {"action": "check"}
+        else:
+            return {"action": "call"}
