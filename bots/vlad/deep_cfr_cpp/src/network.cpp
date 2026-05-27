@@ -88,8 +88,8 @@ std::array<float, N_ACTIONS> forward_single(const MLP& net, const FeatureVec& x)
 // ── Adam update helper ────────────────────────────────────────────────────────
 static void adam_update(Eigen::MatrixXf& param, Eigen::MatrixXf& m, Eigen::MatrixXf& v,
                         const Eigen::MatrixXf& grad, int t) {
-    float bc1 = 1.0f - std::powf(ADAM_BETA1, (float)t);
-    float bc2 = 1.0f - std::powf(ADAM_BETA2, (float)t);
+    float bc1 = 1.0f - std::pow(ADAM_BETA1, (float)t);
+    float bc2 = 1.0f - std::pow(ADAM_BETA2, (float)t);
     m = ADAM_BETA1 * m + (1.0f - ADAM_BETA1) * grad;
     v = ADAM_BETA2 * v + (1.0f - ADAM_BETA2) * grad.cwiseProduct(grad);
     Eigen::MatrixXf m_hat = m / bc1;
@@ -98,8 +98,8 @@ static void adam_update(Eigen::MatrixXf& param, Eigen::MatrixXf& m, Eigen::Matri
 }
 static void adam_update(Eigen::VectorXf& param, Eigen::VectorXf& m, Eigen::VectorXf& v,
                         const Eigen::VectorXf& grad, int t) {
-    float bc1 = 1.0f - std::powf(ADAM_BETA1, (float)t);
-    float bc2 = 1.0f - std::powf(ADAM_BETA2, (float)t);
+    float bc1 = 1.0f - std::pow(ADAM_BETA1, (float)t);
+    float bc2 = 1.0f - std::pow(ADAM_BETA2, (float)t);
     m = ADAM_BETA1 * m + (1.0f - ADAM_BETA1) * grad;
     v = ADAM_BETA2 * v + (1.0f - ADAM_BETA2) * grad.cwiseProduct(grad);
     Eigen::VectorXf m_hat = m / bc1;
