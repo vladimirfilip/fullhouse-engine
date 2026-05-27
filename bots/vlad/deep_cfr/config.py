@@ -58,16 +58,16 @@ HIDDEN_DIM = 512
 N_LAYERS   = 4     # hidden layers
 
 # ── Memory buffers ─────────────────────────────────────────────────────────
-REGRET_BUF_CAP   = 4_000_000
-STRATEGY_BUF_CAP = 4_000_000
+REGRET_BUF_CAP   = 40_000_000
+STRATEGY_BUF_CAP = 40_000_000
 
 # ── Training loop ─────────────────────────────────────────────────────────
 K_ITERATIONS      = 100
 GAMES_PER_ITER    = 10_000
 BATCH_SIZE        = 4_096
 LEARNING_RATE     = 1e-3
-REGRET_TRAIN_STEPS    = 2_000  # SGD steps per iteration on regret net
-STRATEGY_TRAIN_STEPS  = 2_000  # SGD steps on strategy net at the end
+REGRET_TRAIN_STEPS    = 5_000  # SGD steps per iteration on regret net
+STRATEGY_TRAIN_STEPS  = 15_000  # SGD steps on strategy net at the end
 
 # ── Export ─────────────────────────────────────────────────────────────────
 MODEL_FILENAME = "gto_strategy"
