@@ -39,9 +39,11 @@ from .networks import make_regret_net, make_strategy_net
 from .export import export_net
 
 # ── Load C++ data-generation extension ────────────────────────────────────────
+# MSVC puts the .pyd in build/Release/; GCC puts the .so directly in build/.
 _HERE = os.path.dirname(__file__)
-_CPP_BUILD = os.path.join(_HERE, '..', 'deep_cfr_cpp', 'build', 'Release')
-sys.path.insert(0, os.path.abspath(_CPP_BUILD))
+_CPP_ROOT = os.path.abspath(os.path.join(_HERE, '..', 'deep_cfr_cpp', 'build'))
+sys.path.insert(0, os.path.join(_CPP_ROOT, 'Release'))
+sys.path.insert(0, _CPP_ROOT)
 try:
     import deep_cfr_gen
     _USE_CPP = True
