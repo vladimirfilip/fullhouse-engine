@@ -40,8 +40,13 @@ install-system:
 	@if command -v apt-get >/dev/null 2>&1; then \
 	  sudo apt-get update && \
 	  sudo apt-get install -y --no-install-recommends \
-	    build-essential cmake git python3.10 python3.10-venv python3.10-dev \
-	    ca-certificates; \
+	    build-essential cmake git ca-certificates software-properties-common; \
+	  if ! apt-cache show python3.10-venv >/dev/null 2>&1; then \
+	    echo ">> python3.10 not in default repos — adding deadsnakes PPA"; \
+	    sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update; \
+	  fi; \
+	  sudo apt-get install -y --no-install-recommends \
+	    python3.10 python3.10-venv python3.10-dev; \
 	else \
 	  echo "!! apt-get not found. Install: build-essential, cmake, git,"; \
 	  echo "   python3.10, python3.10-venv, python3.10-dev"; \
