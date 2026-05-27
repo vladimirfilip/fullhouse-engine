@@ -1,0 +1,33 @@
+# Internal — kept in separate private repo
+portal/
+supabase/
+matchqueue/
+queue/
+setup_fullhouse.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Node
+node_modules/
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# C++ build artifacts
+bots/vlad/deep_cfr_cpp/build/
+
+# Trained model weights — kept local, not pushed
+*.npz
+
+# Local backup / submission zips
+bots/vlad - Copy/
+bots/vlad - Copy.zip
+bots/vlad.zip
+
+# IDE / local tooling
+.idea/
+.streak/

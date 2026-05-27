@@ -1,0 +1,680 @@
+"""
+
+RULES:
+  - Implement the decide() function below. That's it.
+  - You may import any stdlib module and any library in requirements.txt
+  - You have 2 seconds to return an action or you auto-fold
+  - If your function crashes, it auto-folds for that hand
+
+NOT ALLOWED (will DQ your bot):
+  - External API calls: no Claude/OpenAI/Anthropic/Google/any HTTP. Network is
+    blocked at the container level; trying anyway is a DQ.
+  - File writes during gameplay; data/ is read-only and only at import time.
+  - subprocess / os.system / shell commands.
+  - Threading or async tricks to dodge the 2s/action signal timer.
+  - Reflection: __import__('socket'), getattr(__builtins__, 'open'),
+    eval(), exec(), compile() — do all flagged by the validator.
+  - Collusion between bots you've registered with friends — bots must play
+    independently; coordinated soft-play or chip-dumping = both DQ'd.
+  - Reading other bots' code or hole cards (you can't anyway, but trying = DQ).
+
+OPTIONAL DATA FILES (NEW):
+  Submit a .zip archive containing:
+    bot.py        (this file, required at root)
+    data/         (optional directory with .npz, .pkl, .bin, etc.)
+
+  At module-import time only, you can read from a sibling 'data/' directory:
+
+      import os
+      DATA_DIR = os.environ.get("BOT_DATA_DIR",
+                                os.path.join(os.path.dirname(__file__), "data"))
+      with open(os.path.join(DATA_DIR, "blueprint.npz"), "rb") as f:
+          BLUEPRINT = ...load(f)
+
+  Limits:
+    - Total submission (bot.py + data/) <= 250 MB
+    - data/ alone <= 200 MB
+    - bot.py <= 5 MB
+    - File access during decide() is blocked at the OS level
+
+CARD FORMAT:
+  Cards are strings like "As" (Ace of spades), "Td" (Ten of diamonds)
+  Ranks: 2 3 4 5 6 7 8 9 T J Q K A
+  Suits: s (spades) h (hearts) d (diamonds) c (clubs)
+
+RETURN FORMAT:
+  {"action": "fold"}
+  {"action": "check"}          # only valid when amount_owed == 0
+  {"action": "call"}
+  {"action": "raise", "amount": 1200}   # amount = TOTAL bet, not raise-by
+  {"action": "all_in"}
+
+  Invalid actions default to fold. Raises below min_raise_to are snapped up.
+"""
+
+# ── Imports ───────────────────────────────────────────────────────────────
+import os
+import random
+import time
+
+import math
+
+import numpy as np
+from eval7 import Card, evaluate
+
+# ─────────────────────────────────────────────────────────────────────────
+
+BOT_NAME   = "The House"
+BOT_AVATAR = "robot_1"
+
+RANKS   = "23456789TJQKA"
+SUITS   = "shdc"
+ALL_CARDS = [Card(r + s) for r in RANKS for s in SUITS]
+
+_N_PLAYERS    = 6
+_INITIAL_STACK = 10_000
+_SMALL_BLIND   = 50
+_BIG_BLIND     = 100
+_MAX_RAISES_PER_STREET = 4
+
+_INPUT_DIM = 308   # must match deep_cfr/config.py and deep_cfr_cpp/src/config.hpp
+
+# ── Card encoding (must match deep_cfr/features.py) ───────────────────────
+_CARD_IDX: dict[str, int] = {
+    r + s: ri * 4 + si
+    for ri, r in enumerate(RANKS)
+    for si, s in enumerate(SUITS)
+}
+_ACTION_ONEHOT: dict[str, int] = {
+    "fold": 0, "check": 1, "call": 1, "raise": 2, "all_in": 3,
+}
+_STREET_IDX: dict[str, int] = {
+    "preflop": 0, "flop": 1, "turn": 2, "river": 3,
+}
+
+# Abstract action indices (must match deep_cfr/config.py)
+_FOLD, _CHECK_CALL = 0, 1
+_0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN = 2, 3, 4, 5, 6, 7, 8
+
+
+# ── Feature extraction (mirrors deep_cfr_cpp/src/features.cpp) ─────────────
+# Layout — see deep_cfr/config.py docstring for the full byte-for-byte map.
+
+def _derive_n_raises_this_street(action_log: list, n_seats: int) -> int:
+    """Replicate the engine's per-street raise counter from the public action_log.
+
+    The frozen engine resets n_raises_this_street to 0 at every street change
+    and increments inside handle_aggression() when raise_size >= last_aggression_size.
+    The dict view of the action log loses the per-street boundaries, so we walk
+    forward simulating who still needs to act and detect each round close.
+    Cheap (~150 actions per hand, single pass).
+    """
+    if not action_log:
+        return 0
+
+    # Initial set of seated players seen in the log.
+    seats = sorted({e["seat"] for e in action_log})
+    if not seats:
+        return 0
+    n = max(n_seats, len(seats))
+
+    active        = set(seats)               # not folded
+    all_in_set    = set()
+    bet_this      = {s: 0 for s in seats}    # chips committed this street
+    current_bet   = 0
+    last_agg_size = 0
+    n_raises      = 0
+    to_act        = set()                    # who still needs to act this round
+    street_after_blinds = False              # blinds set up preflop initial state
+
+    def reset_street():
+        nonlocal current_bet, last_agg_size, n_raises
+        for s in seats:
+            bet_this[s] = 0
+        current_bet   = 0
+        last_agg_size = 0
+        n_raises      = 0
+
+    def open_round(initiating_seat):
+        # Everyone still capable of acting needs to act once.
+        return {s for s in active if s not in all_in_set and s != initiating_seat}
+
+    for e in action_log:
+        seat = e["seat"]
+        act  = e.get("action")
+        amt  = e.get("amount", 0)
+
+        if act == "small_blind":
+            bet_this[seat] = amt
+            current_bet = max(current_bet, amt)
+            continue
+        if act == "big_blind":
+            bet_this[seat] = amt
+            current_bet = max(current_bet, amt)
+            last_agg_size = _BIG_BLIND
+            # Preflop: everyone except BB needs to act.
+            to_act = {s for s in active if s not in all_in_set and s != seat}
+            street_after_blinds = True
+            continue
+
+        # Non-blind action; start tracking if we haven't yet.
+        if not street_after_blinds:
+            # Should not happen in a well-formed log, but guard anyway.
+            street_after_blinds = True
+            to_act = set(active) - all_in_set
+
+        to_act.discard(seat)
+
+        if act == "fold":
+            active.discard(seat)
+        elif act == "check":
+            pass
+        elif act == "call":
+            bet_this[seat] = current_bet
+        elif act in ("raise", "all_in"):
+            new_bet  = amt
+            raise_sz = new_bet - current_bet
+            if raise_sz >= last_agg_size and raise_sz > 0:
+                n_raises     += 1
+                last_agg_size = raise_sz
+                # Reopen action for everyone except the aggressor.
+                to_act = {s for s in active if s not in all_in_set and s != seat}
+            bet_this[seat] = new_bet
+            current_bet    = max(current_bet, new_bet)
+            if act == "all_in":
+                all_in_set.add(seat)
+
+        # Round closes when no one needs to act (everyone matched current_bet
+        # or is folded/all-in). Advance street.
+        round_over = (
+            not to_act and
+            all(bet_this[s] == current_bet for s in active if s not in all_in_set)
+        )
+        if round_over:
+            reset_street()
+            # Next street: postflop, first to act is left of dealer; we don't
+            # need that — we just need to be ready to count raises again.
+            to_act = set(active) - all_in_set
+
+    return n_raises
+
+
+def _build_feature_vector(gs: dict) -> np.ndarray:
+    """Convert game-state dict → INPUT_DIM-float numpy array."""
+    vec = np.zeros(_INPUT_DIM, dtype=np.float32)
+
+    # ── 1. Hole cards [0:52] ────────────────────────────────────────────────
+    for card in gs["your_cards"]:
+        vec[_CARD_IDX[card]] = 1.0
+
+    # ── 2. Board cards [52:104] ─────────────────────────────────────────────
+    for card in gs["community_cards"]:
+        vec[52 + _CARD_IDX[card]] = 1.0
+
+    # ── 3. Hero position relative to dealer [104:110] ───────────────────────
+    # Frozen engine doesn't surface dealer_seat, so derive from the SB action.
+    # Heads-up: dealer IS the SB. For 3+ players, SB is one left of dealer.
+    seat      = gs["seat_to_act"]
+    al        = gs["action_log"]
+    n_in_game = max(len(gs["players"]), 1)
+    dealer    = 0
+    if al and al[0].get("action") == "small_blind":
+        sb_seat = al[0]["seat"]
+        dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
+    hero_pos = (seat - dealer) % n_in_game
+    vec[104 + hero_pos] = 1.0
+
+    # ── 4. Pot and stacks [110:117] ─────────────────────────────────────────
+    pot = gs["pot"]
+    vec[110] = pot / _INITIAL_STACK
+    for p in gs["players"][:_N_PLAYERS]:
+        vec[111 + p["seat"]] = p["stack"] / _INITIAL_STACK
+
+    # ── 5. Per-seat status masks [117:135] ──────────────────────────────────
+    for p in gs["players"][:_N_PLAYERS]:
+        ps = p["seat"]
+        if p.get("is_folded"):
+            vec[117 + ps] = 1.0
+        if p.get("is_all_in"):
+            vec[123 + ps] = 1.0
+        vec[129 + ps] = p.get("bet_this_street", 0) / _INITIAL_STACK
+
+    # ── 6. Street one-hot [135:139] ─────────────────────────────────────────
+    vec[135 + _STREET_IDX.get(gs.get("street", "preflop"), 0)] = 1.0
+
+    # ── 7. Pot odds, SPR (log-scaled), owed [139:142] ───────────────────────
+    owed     = gs["amount_owed"]
+    vec[139] = owed / max(pot + owed, 1)
+    spr      = gs["your_stack"] / max(pot, 1)
+    vec[140] = min(math.log10(spr + 1.0) / math.log10(101.0), 1.0)
+    vec[141] = owed / _INITIAL_STACK
+
+    # ── 8. n_raises_this_street, hero bet, eff stack [142:145] ──────────────
+    n_raises = _derive_n_raises_this_street(al, len(gs["players"]))
+    vec[142] = min(n_raises, _MAX_RAISES_PER_STREET) / _MAX_RAISES_PER_STREET
+    vec[143] = gs.get("your_bet_this_street", 0) / _INITIAL_STACK
+    my_stack    = gs["your_stack"]
+    max_opp     = 0
+    for p in gs["players"]:
+        if p["seat"] == seat or p.get("is_folded"):
+            continue
+        max_opp = max(max_opp, p.get("stack", 0))
+    eff_stack   = min(my_stack, max_opp)
+    vec[144] = eff_stack / _INITIAL_STACK
+
+    # ── 9. Last aggressor [145:158] ─────────────────────────────────────────
+    # Most recent RAISE / ALL_IN / BIG_BLIND in action_log (same definition
+    # as features.cpp — bias-free across the train/inference boundary).
+    last_agg_seat   = -1
+    last_agg_amount = 0
+    for e in al:
+        if e.get("action") in ("raise", "all_in", "big_blind"):
+            last_agg_seat   = e["seat"]
+            last_agg_amount = e.get("amount", 0)
+    if 0 <= last_agg_seat < _N_PLAYERS:
+        vec[145 + last_agg_seat] = 1.0
+        vec[151] = last_agg_amount / max(pot, 1)
+        rel = (last_agg_seat - seat) % n_in_game
+        vec[152 + rel] = 1.0
+
+    # ── 10. Board texture [158:163], n_active [163] ─────────────────────────
+    board = gs["community_cards"]
+    if board:
+        bidx     = [_CARD_IDX[c] for c in board]
+        b_suits  = [c % 4 for c in bidx]
+        b_ranks  = [c // 4 for c in bidx]
+        suit_counts = [b_suits.count(s) for s in range(4)]
+        max_suit = max(suit_counts)
+        rank_cnt: dict[int, int] = {}
+        for r in b_ranks:
+            rank_cnt[r] = rank_cnt.get(r, 0) + 1
+        pairs = sum(1 for cnt in rank_cnt.values() if cnt >= 2)
+        rank_set = sorted(set(b_ranks))
+        connected = any(rank_set[i + 1] - rank_set[i] == 1
+                        for i in range(len(rank_set) - 1))
+        vec[158] = 1.0 if max_suit >= 2 else 0.0
+        vec[159] = 1.0 if max_suit >= 3 else 0.0
+        vec[160] = 1.0 if pairs >= 1 else 0.0
+        vec[161] = 1.0 if pairs >= 2 else 0.0
+        vec[162] = 1.0 if connected else 0.0
+    n_active = sum(1 for p in gs["players"] if not p.get("is_folded"))
+    vec[163] = n_active / _N_PLAYERS
+
+    # ── 11. Action history [164:308] — 24 slots × 6 floats ──────────────────
+    regular = [e for e in al if e.get("action") not in ("small_blind", "big_blind")]
+    last24  = regular[-24:]
+    pot_now = max(pot, 1)
+    for slot, e in enumerate(last24):
+        base = 164 + slot * 6
+        vec[base] = e["seat"] / max(_N_PLAYERS - 1, 1)
+        atype = _ACTION_ONEHOT.get(e.get("action", ""), -1)
+        if 0 <= atype <= 3:
+            vec[base + 1 + atype] = 1.0
+        vec[base + 5] = e.get("amount", 0) / pot_now
+
+    return vec
+
+
+# ── Pure-numpy forward pass ────────────────────────────────────────────────
+
+def _numpy_forward(
+    layers: list[tuple[np.ndarray, np.ndarray]],
+    x: np.ndarray,
+) -> np.ndarray:
+    """LeakyReLU MLP → softmax probability vector."""
+    for i, (w, b) in enumerate(layers):
+        x = x @ w.T + b
+        if i < len(layers) - 1:
+            x = np.where(x > 0, x, 0.01 * x)   # LeakyReLU
+    x = x - x.max()
+    e = np.exp(x)
+    return e / e.sum()
+
+
+# ── Model loading (at import / warmup time) ────────────────────────────────
+
+DATA_DIR   = os.environ.get("BOT_DATA_DIR",
+             os.path.join(os.path.dirname(__file__), "data"))
+_MODEL_PATH = os.path.join(DATA_DIR, "gto_strategy.npz")
+
+_GTO_LAYERS: list[tuple[np.ndarray, np.ndarray]] | None = None
+
+_N_ACTIONS = 9   # must match deep_cfr/config.py N_ACTIONS
+
+try:
+    _data = np.load(_MODEL_PATH)
+    _n    = int(_data["n_layers"])
+    _layers_tmp = [(_data[f"layer{i}_w"], _data[f"layer{i}_b"]) for i in range(_n)]
+    _in_dim  = _layers_tmp[0][0].shape[1]
+    _out_dim = _layers_tmp[-1][0].shape[0]
+    if _out_dim != _N_ACTIONS:
+        raise ValueError(
+            f"model output dim {_out_dim} != N_ACTIONS {_N_ACTIONS}; retrain required"
+        )
+    if _in_dim != _INPUT_DIM:
+        raise ValueError(
+            f"model input dim {_in_dim} != INPUT_DIM {_INPUT_DIM}; "
+            f"retrain required (feature vector has changed)"
+        )
+    _GTO_LAYERS = _layers_tmp
+    print(f"[bot] Loaded GTO model ({_n} layers, in={_in_dim}, out={_out_dim}) "
+          f"from {_MODEL_PATH}", flush=True)
+except Exception as _e:
+    print(f"[bot] GTO model not available ({_e}); using Monte Carlo fallback.", flush=True)
+
+
+# ── Abstract action → engine dict ─────────────────────────────────────────
+
+def _jitter_raise(target: int, min_r: int, all_tot: int, jitter: float = 0.05) -> dict:
+    """Apply +-jitter% uniform noise to a raise amount, then clamp to legal range."""
+    jittered = int(target * random.uniform(1 - jitter, 1 + jitter))
+    jittered = max(jittered, min_r)
+    if jittered >= all_tot:
+        return {"action": "all_in"}
+    return {"action": "raise", "amount": jittered}
+
+
+def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
+    pot     = gs["pot"]
+    owed    = gs["amount_owed"]
+    cur_bet = gs["current_bet"]
+    min_r   = gs["min_raise_to"]
+    stack   = gs["your_stack"]
+    my_bet  = gs["your_bet_this_street"]
+    all_tot = my_bet + stack
+    eff_pot = pot + owed
+
+    if action_idx == _FOLD:
+        return {"action": "fold"}
+    if action_idx == _CHECK_CALL:
+        return {"action": "check" if owed == 0 else "call"}
+    if action_idx == _0_27X:
+        target = cur_bet + max(int(eff_pot * 0.27), min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _THIRD:
+        target = cur_bet + max(eff_pot // 3, min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _HALF:
+        target = cur_bet + max(eff_pot // 2, min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _FULL:
+        target = cur_bet + max(eff_pot, min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _1_72X:
+        target = cur_bet + max(int(eff_pot * 1.72), min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _2X:
+        target = cur_bet + max(eff_pot * 2, min_r - cur_bet)
+        return _jitter_raise(target, min_r, all_tot)
+    if action_idx == _ALL_IN:
+        return {"action": "all_in"}
+    return {"action": "fold"}
+
+
+# ── GTO decision ───────────────────────────────────────────────────────────
+
+def _raise_target(action_idx: int, pot: int, owed: int, cur_bet: int, min_r: int) -> int:
+    """Estimate total bet amount for a given abstract raise action."""
+    eff = pot + owed
+    if action_idx == _0_27X:
+        return cur_bet + max(int(eff * 0.27), min_r - cur_bet)
+    if action_idx == _THIRD:
+        return cur_bet + max(eff // 3, min_r - cur_bet)
+    if action_idx == _HALF:
+        return cur_bet + max(eff // 2, min_r - cur_bet)
+    if action_idx == _FULL:
+        return cur_bet + max(eff, min_r - cur_bet)
+    if action_idx == _1_72X:
+        return cur_bet + max(int(eff * 1.72), min_r - cur_bet)
+    if action_idx == _2X:
+        return cur_bet + max(eff * 2, min_r - cur_bet)
+    return min_r
+
+def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
+    """
+    1-level EV lookahead blended with the GTO network prior.
+
+    For each legal abstract action we estimate EV using MC equity plus a
+    simple fold-probability model.  The result is a soft blend (60% GTO /
+    40% EV signal) so the network still drives strategy in unclear spots while
+    the EV signal provides a grounding check.
+
+    Fold probability model for raises:
+        fp = min(0.10 + 0.18 * (target / (pot + owed)), 0.70)
+    This approximates how often a typical opponent folds to a bet of that
+    size; crude, but directionally correct (bigger bets → more folds).
+    """
+    equity = _run_mc(gs, max_iters=600)
+
+    pot   = gs["pot"]
+    owed  = gs["amount_owed"]
+    cur   = gs["current_bet"]
+    min_r = gs["min_raise_to"]
+
+    def _ev(a: int) -> float:
+        if a == _FOLD:
+            return 0.0
+        if a == _CHECK_CALL:
+            if owed == 0:
+                # Check: no chips go in, EV = share of pot we expect to win
+                return equity * pot
+            # Call: win (pot + both sides of the call) equity% of the time,
+            # lose our call amount the rest
+            return equity * (pot + 2 * owed) - (1.0 - equity) * owed
+        target  = _raise_target(a, pot, owed, cur, min_r)
+        rs      = max(target - cur, 0)       # raise increment above current bet
+        my_cost = owed + rs                  # total new chips I commit (call + raise)
+        new_pot = pot + my_cost + rs         # pot if opponent calls (they match rs)
+        # Fold probability: larger bet relative to pot → opponent folds more often
+        fp      = min(0.10 + 0.18 * (target / max(pot + owed, 1)), 0.70)
+        # EV = fold_equity (steal pot) + call_equity (win/lose at showdown)
+        return fp * pot + (1.0 - fp) * (equity * new_pot - (1.0 - equity) * my_cost)
+
+    evs = np.array([_ev(a) for a in legal], dtype=np.float64)
+    evs -= evs.min()
+    evs += 1e-8
+    ev_probs = evs / evs.sum()
+
+    gto_arr = np.array([gto_probs[a] for a in legal], dtype=np.float64)
+    gto_arr = np.maximum(gto_arr, 0.0)
+    if gto_arr.sum() < 1e-12:
+        gto_arr[:] = 1.0 / len(legal)
+    else:
+        gto_arr /= gto_arr.sum()
+
+    blended = 0.6 * gto_arr + 0.4 * ev_probs
+    blended /= blended.sum()
+    return legal[int(np.random.choice(len(legal), p=blended))]
+
+
+def _gto_decide(gs: dict) -> dict:
+    """Run the GTO strategy net with real-time EV blending."""
+    vec   = _build_feature_vector(gs)
+    probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
+
+    owed  = gs["amount_owed"]
+    stack = gs["your_stack"]
+
+    legal = [_CHECK_CALL]
+    if owed > 0:
+        legal.append(_FOLD)
+    if stack > 0:
+        legal += [_0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN]
+
+    action_idx = _realtime_search(gs, legal, probs)
+    return _abstract_to_raw(action_idx, gs)
+
+
+# ── Monte Carlo equity (fallback) ──────────────────────────────────────────
+
+def monte_carlo_equity(
+    hole_cards: list,
+    board_cards: list,
+    remaining_cards: list,
+    num_opponents: int = 1,
+    time_limit: float = 0.5,
+    max_iters: int | None = None,
+) -> float:
+    start = time.time()
+    wins, iters = 0, 0
+    while (max_iters is None and time.time() - start < time_limit) or \
+          (max_iters is not None and iters < max_iters):
+        random.shuffle(remaining_cards)
+        opp_hands = [remaining_cards[i * 2: i * 2 + 2] for i in range(num_opponents)]
+        board     = list(board_cards)
+        for i in range(5 - len(board_cards)):
+            board.append(remaining_cards[2 * num_opponents + i])
+        my_score   = evaluate(hole_cards + board)
+        opp_scores = [evaluate(oh + board) for oh in opp_hands]
+        best       = max(my_score, *opp_scores)
+        if my_score == best:
+            n_tied  = opp_scores.count(best)
+            wins   += 1 / (n_tied + 1)
+        iters += 1
+    return wins / max(iters, 1)
+
+
+def choose_action(mc_equity, pot, amount_owed, already_bet, min_raise_to, your_stack, n_players,
+                  maniac_count=0, calling_station_count=0, nit_count=0):
+    if maniac_count > 0:
+        buffer = 0.02
+    elif n_players == 2:
+        buffer = 0.10
+    elif n_players <= 4:
+        buffer = 0.15
+    else:
+        buffer = 0.30
+    buffer = max(0.0, buffer - 0.05 * nit_count)
+    required_equity = amount_owed / (pot + amount_owed) if amount_owed > 0 else 0
+
+    if mc_equity < required_equity + buffer:
+        return {"action": "check"} if amount_owed == 0 else {"action": "fold"}
+
+    raise_threshold = 0.60 if (calling_station_count > 0 and maniac_count == 0) else 0.80
+    if mc_equity > raise_threshold or mc_equity > required_equity + buffer + 0.15:
+        all_chips    = already_bet + your_stack
+        if all_chips < pot * 2:
+            return {"action": "all_in"}
+        raise_amount = max(min_raise_to, already_bet + amount_owed)
+        raise_amount = min(raise_amount, all_chips)
+        if raise_amount == all_chips:
+            return {"action": "all_in"}
+        return _jitter_raise(raise_amount, min_raise_to, all_chips)
+
+    return {"action": "check"} if amount_owed == 0 else {"action": "call"}
+
+
+def _profile_opponents(match_log: list, players: list, my_seat: int) -> dict:
+    my_bot_id = next((p["bot_id"] for p in players if p["seat"] == my_seat), None)
+    counts: dict[str, dict] = {}
+    for entry in match_log:
+        bid = entry.get("bot_id")
+        if bid is None or bid == my_bot_id:
+            continue
+        act = entry.get("action", "")
+        if bid not in counts:
+            counts[bid] = {"fold": 0, "check": 0, "call": 0, "raise": 0, "all_in": 0, "total": 0}
+        if act in counts[bid]:
+            counts[bid][act] += 1
+        counts[bid]["total"] += 1
+
+    profiles: dict[str, str] = {}
+    for bid, c in counts.items():
+        t = c["total"]
+        if t < 5:
+            profiles[bid] = "unknown"
+            continue
+        if (c["all_in"] + c["raise"]) / t > 0.50:
+            profiles[bid] = "maniac"
+        elif c["call"] / t > 0.50:
+            profiles[bid] = "calling_station"
+        elif c["fold"] / t > 0.60:
+            profiles[bid] = "nit"
+        else:
+            profiles[bid] = "normal"
+    return profiles
+
+
+def _count_active_profiles(profiles: dict, players: list, my_seat: int) -> tuple[int, int, int]:
+    maniac_count = station_count = nit_count = 0
+    for p in players:
+        if p["seat"] == my_seat or p["state"] in ("folded", "busted"):
+            continue
+        label = profiles.get(p["bot_id"], "unknown")
+        if label == "maniac":
+            maniac_count += 1
+        elif label == "calling_station":
+            station_count += 1
+        elif label == "nit":
+            nit_count += 1
+    return maniac_count, station_count, nit_count
+
+
+def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = None) -> float:
+    my_cards    = list(map(Card, game_state["your_cards"]))
+    board_cards = list(map(Card, game_state["community_cards"]))
+    rest_cards  = [c for c in ALL_CARDS if c not in my_cards and c not in board_cards]
+    n_opp = max(sum(
+        p["state"] in ("active", "all_in")
+        for p in game_state["players"]
+        if p["seat"] != game_state["seat_to_act"]
+    ), 1)
+    return monte_carlo_equity(my_cards, board_cards, rest_cards, n_opp, time_limit, max_iters)
+
+
+# ── Main entry point ───────────────────────────────────────────────────────
+
+def _action_seed(game_state: dict) -> int:
+    """Stable integer seed derived entirely from deterministic game-state fields."""
+    hand_id = game_state.get("hand_id", "")
+    # hand_id format: "<match_id>_h<NNNN>" — extract the hand number
+    try:
+        hand_num = int(hand_id.rsplit("_h", 1)[-1])
+    except (ValueError, IndexError):
+        hand_num = 0
+    action_count = len(game_state.get("action_log", []))
+    seat = game_state.get("seat_to_act", 0)
+    return (hand_num * 10_000 + action_count * 10 + seat) % (2 ** 31)
+
+
+def decide(game_state: dict) -> dict:
+    """Called once per action. Must return within 2 seconds."""
+
+    if game_state.get("type") == "warmup":
+        return {"action": "check"}
+
+    # Seed both RNGs from game state so replays with the same match seed are identical.
+    _seed = _action_seed(game_state)
+    random.seed(_seed)
+    np.random.seed(_seed)
+
+    my_seat = game_state["seat_to_act"]
+    profiles = _profile_opponents(
+        game_state.get("match_action_log", []), game_state["players"], my_seat
+    )
+    maniac_count, station_count, nit_count = _count_active_profiles(
+        profiles, game_state["players"], my_seat
+    )
+
+    # ── GTO path ──────────────────────────────────────────────────────────
+    if _GTO_LAYERS is not None:
+        try:
+            return _gto_decide(game_state)
+        except Exception:
+            pass
+
+    # ── Monte Carlo fallback ───────────────────────────────────────────────
+    equity = _run_mc(game_state, time_limit=0.5)
+    pot    = game_state["pot"]
+    active = sum(p["state"] == "active" for p in game_state["players"])
+    return choose_action(
+        equity, pot,
+        game_state["amount_owed"],
+        game_state["your_bet_this_street"],
+        game_state["min_raise_to"],
+        game_state["your_stack"],
+        active,
+        maniac_count=maniac_count,
+        calling_station_count=station_count,
+        nit_count=nit_count,
+    )
