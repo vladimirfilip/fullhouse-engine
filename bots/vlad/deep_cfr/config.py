@@ -47,11 +47,11 @@ BIG_BLIND     = 100
 #   [143]     hero bet_this_street / INITIAL_STACK
 #   [144]     min effective stack / INITIAL_STACK
 #   [145:151] last-aggressor seat one-hot (6)
-#   [151]     last-aggressor amount / pot
+#   [151]     last-aggressor amount / INITIAL_STACK
 #   [152:158] last-aggressor pos rel. hero one-hot (6)
 #   [158:163] board texture (flush-draw, monotone, paired, two-paired, connected)
 #   [163]     n_active / N_PLAYERS
-#   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/pot)
+#   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
 INPUT_DIM  = 308
 MAX_RAISES_PER_STREET = 4    # mirrors deep_cfr_cpp/src/config.hpp
 HIDDEN_DIM = 512

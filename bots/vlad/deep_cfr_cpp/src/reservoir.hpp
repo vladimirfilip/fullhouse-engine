@@ -14,7 +14,11 @@ template<typename T>
 class ReservoirBuffer {
 public:
     explicit ReservoirBuffer(int capacity) : capacity_(capacity), n_seen_(0) {
-        data_.reserve(std::min(capacity, 1 << 20));
+        // Reserve the full capacity upfront so std::vector never reallocates.
+        // Without this, the geometric doubling strategy of libstdc++ would
+        // transiently allocate ~2× capacity (e.g. 8 M slots when cap=4 M),
+        // causing ~20 GB peak RSS on Linux during the first fill.
+        data_.reserve(capacity);
     }
 
     void add(const T& item) {

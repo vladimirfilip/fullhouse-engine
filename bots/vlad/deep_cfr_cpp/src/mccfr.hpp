@@ -11,6 +11,7 @@
 struct RegretSample {
     FeatureVec state;
     float regrets[N_ACTIONS];
+    float weight; // iteration_t — Linear-CFR weighting (matches strategy samples)
 };
 struct StrategySample {
     FeatureVec state;

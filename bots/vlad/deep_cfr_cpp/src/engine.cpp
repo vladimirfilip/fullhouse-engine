@@ -387,7 +387,7 @@ StateDict PokerEngine::build_state(int seat) const {
     s.n_raises_this_street = n_raises_this_street_;
     for (int i = 0; i < n_; i++) s.players[i] = players_[i];
     int log_entries = std::min(n_log_actions_, MAX_HAND_ACTIONS);
-    s.action_log.resize(log_entries);  // never reallocates: GameState ctor pre-reserves
+    s.action_log.resize(log_entries);
     for (int i = 0; i < log_entries; i++) s.action_log[i] = action_log_[i];
     return s;
 }

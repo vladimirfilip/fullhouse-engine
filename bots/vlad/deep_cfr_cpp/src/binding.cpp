@@ -13,7 +13,9 @@ using farray = py::array_t<float, py::array::c_style | py::array::forcecast>;
 // Reconstruct MLP from flat list of numpy arrays [W0, b0, W1, b1, ...].
 // W_i shape: [out_dim, in_dim] row-major (matches PyTorch param.numpy() layout).
 static MLP mlp_from_weights(const std::vector<farray>& arrs) {
-    MLP net = make_regret_net();
+    // Use inference-only net (no Adam moment matrices) — saves ~7.6 MB per
+    // generate_and_add() call and eliminates associated heap fragmentation.
+    MLP net = make_inference_net(false);
     int n_layers = (int)net.layers.size();
     if ((int)arrs.size() < n_layers * 2)
         throw std::runtime_error("Not enough weight arrays for this network architecture");
@@ -99,11 +101,16 @@ public:
     // prefetch from Python: submit this in a ThreadPoolExecutor while the main
     // thread runs PyTorch forward/backward on the previous batch.
     // Returns the actual number of rows written (≤ states_out.shape(0)).
-    int sample_regret_into(farray states_out, farray targets_out) {
+    // Fill pre-allocated arrays in-place. Releases GIL during sampling.
+    // Returns actual rows written (≤ states_out.shape[0]).
+    // weights_out receives the per-sample iteration_t for Linear-CFR weighting.
+    int sample_regret_into(farray states_out, farray targets_out, farray weights_out) {
         auto s_info = states_out.request();
         auto t_info = targets_out.request();
+        auto w_info = weights_out.request();
         float* s = static_cast<float*>(s_info.ptr);
         float* t = static_cast<float*>(t_info.ptr);
+        float* w = static_cast<float*>(w_info.ptr);
         int batch_size = (int)s_info.shape[0];
         {
             py::gil_scoped_release release;
@@ -114,6 +121,7 @@ public:
                             batch[i].state.data(), INPUT_DIM * sizeof(float));
                 std::memcpy(t + (size_t)i * N_ACTIONS,
                             batch[i].regrets,     N_ACTIONS * sizeof(float));
+                w[i] = batch[i].weight;
             }
             return k;
         }
@@ -167,13 +175,14 @@ PYBIND11_MODULE(deep_cfr_gen, m) {
              "Run parallel MCCFR and add samples directly to internal reservoirs.")
         .def("sample_regret", &DeepCFRBuffers::sample_regret,
              py::arg("batch_size"),
-             "Sample a training batch. Returns (states [B,274], targets [B,9]).")
+             "Sample a training batch. Returns (states [B,308], targets [B,9]).")
         .def("sample_strategy", &DeepCFRBuffers::sample_strategy,
              py::arg("batch_size"),
              "Sample a training batch. Returns (states, targets [B,9], weights [B]).")
         .def("sample_regret_into", &DeepCFRBuffers::sample_regret_into,
-             py::arg("states_out"), py::arg("targets_out"),
+             py::arg("states_out"), py::arg("targets_out"), py::arg("weights_out"),
              "Fill pre-allocated arrays in-place. Releases GIL during sampling. "
+             "weights_out receives per-sample iteration_t for Linear-CFR weighting. "
              "Returns actual rows written (≤ states_out.shape[0]).")
         .def("sample_strategy_into", &DeepCFRBuffers::sample_strategy_into,
              py::arg("states_out"), py::arg("targets_out"), py::arg("weights_out"),

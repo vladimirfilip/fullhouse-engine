@@ -147,13 +147,19 @@ def _derive_n_raises_this_street(action_log: list, n_seats: int) -> int:
         if act == "small_blind":
             bet_this[seat] = amt
             current_bet = max(current_bet, amt)
+            # Player posted less than the full blind → all-in from blind post.
+            if amt < _SMALL_BLIND:
+                all_in_set.add(seat)
             continue
         if act == "big_blind":
             bet_this[seat] = amt
             current_bet = max(current_bet, amt)
             last_agg_size = _BIG_BLIND
-            # Preflop: everyone except BB needs to act.
-            to_act = {s for s in active if s not in all_in_set and s != seat}
+            if amt < _BIG_BLIND:
+                all_in_set.add(seat)
+            # Preflop: everyone except BB needs to act (BB is included so it
+            # can exercise its option — mirrors engine start_hand semantics).
+            to_act = {s for s in active if s not in all_in_set}
             street_after_blinds = True
             continue
 
@@ -273,7 +279,7 @@ def _build_feature_vector(gs: dict) -> np.ndarray:
             last_agg_amount = e.get("amount", 0)
     if 0 <= last_agg_seat < _N_PLAYERS:
         vec[145 + last_agg_seat] = 1.0
-        vec[151] = last_agg_amount / max(pot, 1)
+        vec[151] = last_agg_amount / _INITIAL_STACK
         rel = (last_agg_seat - seat) % n_in_game
         vec[152 + rel] = 1.0
 
@@ -297,20 +303,22 @@ def _build_feature_vector(gs: dict) -> np.ndarray:
         vec[160] = 1.0 if pairs >= 1 else 0.0
         vec[161] = 1.0 if pairs >= 2 else 0.0
         vec[162] = 1.0 if connected else 0.0
-    n_active = sum(1 for p in gs["players"] if not p.get("is_folded"))
+    n_active = sum(1 for p in gs["players"]
+                   if not p.get("is_folded") and p.get("state") != "busted")
     vec[163] = n_active / _N_PLAYERS
 
     # ── 11. Action history [164:308] — 24 slots × 6 floats ──────────────────
     regular = [e for e in al if e.get("action") not in ("small_blind", "big_blind")]
     last24  = regular[-24:]
-    pot_now = max(pot, 1)
     for slot, e in enumerate(last24):
         base = 164 + slot * 6
         vec[base] = e["seat"] / max(_N_PLAYERS - 1, 1)
         atype = _ACTION_ONEHOT.get(e.get("action", ""), -1)
         if 0 <= atype <= 3:
             vec[base + 1 + atype] = 1.0
-        vec[base + 5] = e.get("amount", 0) / pot_now
+        # Normalise by INITIAL_STACK so early bets are not compressed by
+        # the large current pot (mirrors features.cpp).
+        vec[base + 5] = e.get("amount", 0) / _INITIAL_STACK
 
     return vec
 
@@ -389,7 +397,7 @@ def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
     if action_idx == _CHECK_CALL:
         return {"action": "check" if owed == 0 else "call"}
     if action_idx == _0_27X:
-        target = cur_bet + max(int(eff_pot * 0.27), min_r - cur_bet)
+        target = cur_bet + max(round(eff_pot * 0.27), min_r - cur_bet)
         return _jitter_raise(target, min_r, all_tot)
     if action_idx == _THIRD:
         target = cur_bet + max(eff_pot // 3, min_r - cur_bet)
@@ -401,7 +409,7 @@ def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
         target = cur_bet + max(eff_pot, min_r - cur_bet)
         return _jitter_raise(target, min_r, all_tot)
     if action_idx == _1_72X:
-        target = cur_bet + max(int(eff_pot * 1.72), min_r - cur_bet)
+        target = cur_bet + max(round(eff_pot * 1.72), min_r - cur_bet)
         return _jitter_raise(target, min_r, all_tot)
     if action_idx == _2X:
         target = cur_bet + max(eff_pot * 2, min_r - cur_bet)
@@ -417,7 +425,7 @@ def _raise_target(action_idx: int, pot: int, owed: int, cur_bet: int, min_r: int
     """Estimate total bet amount for a given abstract raise action."""
     eff = pot + owed
     if action_idx == _0_27X:
-        return cur_bet + max(int(eff * 0.27), min_r - cur_bet)
+        return cur_bet + max(round(eff * 0.27), min_r - cur_bet)
     if action_idx == _THIRD:
         return cur_bet + max(eff // 3, min_r - cur_bet)
     if action_idx == _HALF:
@@ -425,7 +433,7 @@ def _raise_target(action_idx: int, pot: int, owed: int, cur_bet: int, min_r: int
     if action_idx == _FULL:
         return cur_bet + max(eff, min_r - cur_bet)
     if action_idx == _1_72X:
-        return cur_bet + max(int(eff * 1.72), min_r - cur_bet)
+        return cur_bet + max(round(eff * 1.72), min_r - cur_bet)
     if action_idx == _2X:
         return cur_bet + max(eff * 2, min_r - cur_bet)
     return min_r
@@ -451,6 +459,9 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
     cur   = gs["current_bet"]
     min_r = gs["min_raise_to"]
 
+    my_bet  = gs["your_bet_this_street"]
+    my_stack = gs["your_stack"]
+
     def _ev(a: int) -> float:
         if a == _FOLD:
             return 0.0
@@ -458,8 +469,15 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
             if owed == 0:
                 # Check: no chips go in, EV = share of pot we expect to win
                 return equity * pot
-            # Call: pot already contains opponent's chips; winning nets pot+owed.
-            return equity * (pot + owed) - (1.0 - equity) * owed
+            # Call: win the pot already in the middle, or lose the call amount.
+            return equity * pot - (1.0 - equity) * owed
+        if a == _ALL_IN:
+            # All-in: commit all remaining chips.
+            all_tot  = my_bet + my_stack
+            opp_call = max(all_tot - cur, 0)
+            new_pot  = pot + my_stack + opp_call
+            fp       = min(0.10 + 0.18 * (all_tot / max(pot + owed, 1)), 0.70)
+            return fp * pot + (1.0 - fp) * (equity * new_pot - my_stack)
         target  = _raise_target(a, pot, owed, cur, min_r)
         rs      = max(target - cur, 0)       # raise increment above current bet
         my_cost = owed + rs                  # total new chips I commit (call + raise)
@@ -491,17 +509,46 @@ def _gto_decide(gs: dict) -> dict:
     vec   = _build_feature_vector(gs)
     probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
 
-    owed    = gs["amount_owed"]
-    stack   = gs["your_stack"]
-    n_raises = _derive_n_raises_this_street(
-        gs.get("action_log", []), len(gs["players"])
-    )
+    owed  = gs["amount_owed"]
+    stack = gs["your_stack"]
+    # n_raises is already encoded in vec[142]; read it back to avoid
+    # a second walk of the action log.
+    n_raises = round(vec[142] * _MAX_RAISES_PER_STREET)
 
     legal = [_CHECK_CALL]
     if owed > 0:
         legal.append(_FOLD)
-    if stack > 0 and n_raises < _MAX_RAISES_PER_STREET:
-        legal += [_0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN]
+    if stack > 0:
+        if n_raises < _MAX_RAISES_PER_STREET:
+            # Mirror the C++ deduplication in get_legal_actions():
+            #   • drop any bet whose target >= all_in_tot (would collapse to
+            #     all-in, duplicating the explicit ALL_IN entry below)
+            #   • skip duplicate targets (two fractions can clamp to the same
+            #     min-raise at shallow effective stacks)
+            pot      = gs["pot"]
+            eff_pot  = pot + owed
+            cur      = gs["current_bet"]
+            min_r    = gs["min_raise_to"]
+            my_bet   = gs.get("your_bet_this_street", 0)
+            all_tot  = my_bet + stack
+            min_rb   = min_r - cur
+            last_tgt = -1
+            for a_idx, rb_raw in (
+                (_0_27X, round(eff_pot * 0.27)),
+                (_THIRD, eff_pot // 3),
+                (_HALF,  eff_pot // 2),
+                (_FULL,  eff_pot),
+                (_1_72X, round(eff_pot * 1.72)),
+                (_2X,    eff_pot * 2),
+            ):
+                rb  = max(rb_raw, min_rb)
+                tgt = cur + rb
+                if tgt < all_tot and tgt != last_tgt:
+                    last_tgt = tgt
+                    legal.append(a_idx)
+        # ALL_IN is always legal when the player has chips, even past the
+        # raise cap — committing all chips is not a standard re-raise.
+        legal.append(_ALL_IN)
 
     action_idx = _realtime_search(gs, legal, probs)
     return _abstract_to_raw(action_idx, gs)

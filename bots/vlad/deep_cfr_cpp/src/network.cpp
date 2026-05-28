@@ -24,6 +24,17 @@ static Layer make_layer(int in_dim, int out_dim, std::mt19937& rng) {
     return l;
 }
 
+// Inference-only layer: allocates W and b but leaves Adam moments as 0×0 matrices
+// (no heap allocation).  Used by make_inference_net() to cut ~7.6 MB per call.
+static Layer make_inference_layer(int in_dim, int out_dim) {
+    Layer l;
+    l.W = Eigen::MatrixXf(out_dim, in_dim);
+    l.b = Eigen::VectorXf::Zero(out_dim);
+    // mW, vW, mb, vb stay default-constructed (size 0) — forward_single never
+    // touches them, and backprop_and_update is never called on this net.
+    return l;
+}
+
 static MLP make_net(bool softmax_output) {
     std::mt19937 rng(std::random_device{}());
     MLP net;
@@ -40,6 +51,19 @@ static MLP make_net(bool softmax_output) {
 
 MLP make_regret_net()   { return make_net(false); }
 MLP make_strategy_net() { return make_net(true);  }
+
+MLP make_inference_net(bool softmax_output) {
+    MLP net;
+    net.softmax_output = softmax_output;
+    net.adam_t         = 0;
+    int in_dim = INPUT_DIM;
+    for (int i = 0; i < N_LAYERS; i++) {
+        net.layers.push_back(make_inference_layer(in_dim, HIDDEN_DIM));
+        in_dim = HIDDEN_DIM;
+    }
+    net.layers.push_back(make_inference_layer(HIDDEN_DIM, N_ACTIONS));
+    return net;
+}
 
 // ── Forward pass (batch=1) ────────────────────────────────────────────────────
 // MCCFR calls this millions of times per iteration. Three thread-local buffers,

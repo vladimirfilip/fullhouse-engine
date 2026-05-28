@@ -34,11 +34,11 @@ static int action_onehot_idx(ActionType a) {
 //   [143]     hero bet_this_street / INITIAL_STACK
 //   [144]     min effective stack vs opponents / INITIAL_STACK
 //   [145:151] last-aggressor seat one-hot (6)
-//   [151]     last-aggressor amount / pot
+//   [151]     last-aggressor amount / INITIAL_STACK
 //   [152:158] last-aggressor position rel. hero one-hot (6)
 //   [158:163] board texture: flush-draw, monotone, paired, two-paired, connected (5)
 //   [163]     n_active (active+all_in) / N_PLAYERS
-//   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/pot)
+//   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
 // Mirror exactly in bots/vlad/bot.py — any drift silently corrupts inference.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ FeatureVec build_feature_vector(const StateDict& s) {
     vec[141] = owed / INITIAL_STACK;
 
     // ── 8. Raises this street, hero bet, effective stack, n_active [142:145,163]
-    vec[142] = (float)s.n_raises_this_street / std::max(MAX_RAISES_PER_STREET, 1);
+    vec[142] = (float)std::min(s.n_raises_this_street, MAX_RAISES_PER_STREET) / std::max(MAX_RAISES_PER_STREET, 1);
     vec[143] = (float)s.your_bet_this_street / INITIAL_STACK;
     int max_opp_stack = 0, n_active = 0;
     for (int i = 0; i < s.n_players_seated; i++) {
@@ -147,21 +147,24 @@ FeatureVec build_feature_vector(const StateDict& s) {
 
     if (last_agg_seat >= 0 && last_agg_seat < N_PLAYERS) {
         vec[145 + last_agg_seat] = 1.0f;
-        vec[151] = (float)last_agg_amount / std::max(pot, 1.0f);
+        // Normalise by INITIAL_STACK (stable scale) rather than current pot,
+        // which already includes this bet and would understate its size.
+        vec[151] = (float)last_agg_amount / INITIAL_STACK;
         int rel_pos = ((last_agg_seat - s.seat_to_act) % n_in_game + n_in_game) % n_in_game;
         vec[152 + rel_pos] = 1.0f;
     }
 
-    int n_slots    = n_seen <= 24 ? n_seen : 24;
-    int start_pos  = n_seen <= 24 ? 0 : ring_head;
-    float pot_now  = std::max(pot, 1.0f);
+    int n_slots   = n_seen <= 24 ? n_seen : 24;
+    int start_pos = n_seen <= 24 ? 0 : ring_head;
     for (int slot = 0; slot < n_slots; slot++) {
         const ActionEntry& e = *ring[(start_pos + slot) % 24];
         int base  = 164 + slot * 6;
         vec[base] = (float)e.seat / std::max(N_PLAYERS - 1, 1);
         int atype = action_onehot_idx(e.action);
         if (atype >= 0) vec[base + 1 + atype] = 1.0f;
-        vec[base + 5] = (float)e.amount / pot_now;
+        // Normalise by INITIAL_STACK so early small bets are not compressed
+        // by the large current pot (which would happen if we divided by pot_now).
+        vec[base + 5] = (float)e.amount / INITIAL_STACK;
     }
 
     return vec;

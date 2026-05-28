@@ -7,10 +7,11 @@ Usage (from repo root):
 Outputs:
     bots/vlad/data/gto_strategy.npz   -- numpy weights for the production bot
 
-Data generation is parallelised across N_WORKERS processes (one per CPU core).
-Each worker runs a batch of independent MCCFR traversals and returns raw numpy
-arrays; the main process aggregates them into the reservoir buffers.  The GIL
-does not limit throughput because each worker is a separate OS process.
+Data generation is parallelised across N_WORKERS C++ std::threads (one per CPU
+core) inside the deep_cfr_gen extension.  Each thread runs independent MCCFR
+traversals and writes directly into the shared C++ reservoir buffers via a
+thread-safe add_batch().  The GIL is released for the entire generate_and_add()
+call, so Python training and C++ data-gen can overlap via ThreadPoolExecutor.
 
 Training (regret / strategy net SGD steps) remains on the main process CPU.
 """
@@ -81,37 +82,52 @@ def _parallel_generate(
 
 def _train_regret(net: nn.Module, cpp_buffers, n_steps: int,
                   device: torch.device) -> float:
-    """MSE training on (state, regret_vector) pairs.
+    """Iteration-weighted MSE on (state, regret_vector, weight) triples.
 
     Uses double-buffered prefetch: a background thread fills numpy buffer B via
     GIL-free sample_regret_into() while PyTorch trains on buffer A, then they
     swap. This hides the ~10–20 ms C++ sampling cost behind forward/backward.
+
+    Linear-CFR weighting (weight = iteration_t) ensures later iterations
+    dominate: early regret estimates from the random-initialised network are
+    down-weighted relative to well-trained late iterations.
     """
     net.train()
     opt     = optim.Adam(net.parameters(), lr=LEARNING_RATE)
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.MSELoss(reduction="none")
     last_loss = 0.0
 
-    # Two buffer pairs — training uses one while C++ fills the other.
+    # Two buffer triples — training uses one while C++ fills the other.
     s_bufs = [np.empty((BATCH_SIZE, INPUT_DIM), dtype=np.float32) for _ in range(2)]
     t_bufs = [np.empty((BATCH_SIZE, N_ACTIONS), dtype=np.float32) for _ in range(2)]
+    w_bufs = [np.empty((BATCH_SIZE,),           dtype=np.float32) for _ in range(2)]
     # torch.from_numpy shares memory (zero-copy); kept alive for the run.
     s_tens = [torch.from_numpy(b) for b in s_bufs]
     t_tens = [torch.from_numpy(b) for b in t_bufs]
+    w_tens = [torch.from_numpy(b) for b in w_bufs]
 
     cur = 0
     with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(cpp_buffers.sample_regret_into, s_bufs[cur], t_bufs[cur])
+        fut = pool.submit(cpp_buffers.sample_regret_into,
+                          s_bufs[cur], t_bufs[cur], w_bufs[cur])
         for step in range(n_steps):
             k   = fut.result()          # wait for current buffer to be ready
             nxt = 1 - cur
             if step < n_steps - 1:     # pre-fetch into the other buffer
-                fut = pool.submit(cpp_buffers.sample_regret_into, s_bufs[nxt], t_bufs[nxt])
+                fut = pool.submit(cpp_buffers.sample_regret_into,
+                                  s_bufs[nxt], t_bufs[nxt], w_bufs[nxt])
 
             states  = s_tens[cur][:k].to(device, non_blocking=True)
             targets = t_tens[cur][:k].to(device, non_blocking=True)
-            preds   = net(states)
-            loss    = loss_fn(preds, targets)
+            weights = w_tens[cur][:k].to(device, non_blocking=True)
+
+            preds    = net(states)
+            per_elem = loss_fn(preds, targets)          # [B, N_ACTIONS]
+            per_samp = per_elem.mean(dim=1)             # [B]
+            # Linear CFR weighting: weight = iteration_t, applied as a true
+            # weighted mean. Same pattern as _train_strategy.
+            loss     = (per_samp * weights).sum() / (weights.sum() + 1e-8)
+
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -221,6 +237,10 @@ def train(
         # ── Train fresh regret net on full accumulated buffer ─────────────
         if cpp_buffers.regret_ready(BATCH_SIZE):
             print(f"  Training regret net ({REGRET_TRAIN_STEPS} steps)…")
+            # Explicitly release the old net before allocating the new one so
+            # Python's reference-counter frees its tensors + Adam moments
+            # immediately rather than waiting for GC on the next cycle.
+            del regret_net
             regret_net = make_regret_net().to(device)
             _train_regret(regret_net, cpp_buffers, REGRET_TRAIN_STEPS, device)
         else:
@@ -229,12 +249,16 @@ def train(
         elapsed = time.perf_counter() - t0
         print(f"  Iteration done in {elapsed:.1f}s")
 
-        # ── Checkpoint: save the freshly-trained regret net ───────────────────
-        out_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        os.makedirs(out_dir, exist_ok=True)
-        ckpt_path = os.path.join(out_dir, f"regret_net_iter_{t}.npz")
+        # ── Checkpoint: save outside data/ (keep last 3 to cap disk use) ────────
+        ckpt_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ckpt_path = os.path.join(ckpt_dir, f"regret_net_iter_{t}.npz")
         export_net(regret_net, ckpt_path)
         print(f"  Checkpoint -> {os.path.abspath(ckpt_path)}")
+        # Delete checkpoints older than the last 3 to avoid unbounded disk use.
+        old = os.path.join(ckpt_dir, f"regret_net_iter_{t - 3}.npz")
+        if os.path.exists(old):
+            os.remove(old)
 
     # ── Final strategy net training ────────────────────────────────────────
     if cpp_buffers.strategy_ready(BATCH_SIZE):

@@ -9,8 +9,10 @@
 GameState::GameState(int n_players)
     : started_(false), done_(false), n_players_(n_players) {
     std::fill(payoffs_, payoffs_ + N_PLAYERS, 0.0f);
-    // Pre-reserve so engine_.build_state()'s resize() never reallocates.
-    state_.action_log.reserve(MAX_HAND_ACTIONS);
+    // state_.action_log is NOT pre-reserved here: state_ is always replaced
+    // immediately by a move-assign from start_hand() / apply_action(), so any
+    // upfront reservation would be wasted (alloc + free per node expansion).
+    // build_state() resizes to the exact action count, allocating once.
 }
 
 bool GameState::is_terminal()    const { return done_; }
@@ -34,7 +36,7 @@ LegalActions GameState::get_legal_actions() const {
         acts.acts[acts.n++] = FOLD;
     acts.acts[acts.n++] = CHECK_CALL;
 
-    if (state_.your_stack > 0 && state_.n_raises_this_street < MAX_RAISES_PER_STREET) {
+    if (state_.your_stack > 0) {
         int cur_bet      = state_.current_bet;
         int min_r        = state_.min_raise_to;
         int my_bet       = state_.your_bet_this_street;
@@ -42,25 +44,30 @@ LegalActions GameState::get_legal_actions() const {
         int eff_pot      = state_.pot + state_.amount_owed;
         int min_raise_by = min_r - cur_bet;
 
-        // Add a bet size only if (a) it doesn't collapse to ALL_IN and
-        // (b) it isn't a duplicate of the previous size (two fractions can
-        // both clamp to the same min-raise target at shallow effective stacks).
-        int last_target = -1;
-        auto add_bet = [&](int action_idx, int raise_by_raw) {
-            int raise_by = std::max(raise_by_raw, min_raise_by);
-            int target   = cur_bet + raise_by;
-            if (target < all_in_tot && target != last_target) {
-                last_target = target;
-                acts.acts[acts.n++] = action_idx;
-            }
-        };
+        // Fractional bet sizes only when raise cap not yet hit.
+        if (state_.n_raises_this_street < MAX_RAISES_PER_STREET) {
+            // Add a bet size only if (a) it doesn't collapse to ALL_IN and
+            // (b) it isn't a duplicate of the previous size (two fractions can
+            // both clamp to the same min-raise target at shallow effective stacks).
+            int last_target = -1;
+            auto add_bet = [&](int action_idx, int raise_by_raw) {
+                int raise_by = std::max(raise_by_raw, min_raise_by);
+                int target   = cur_bet + raise_by;
+                if (target < all_in_tot && target != last_target) {
+                    last_target = target;
+                    acts.acts[acts.n++] = action_idx;
+                }
+            };
 
-        add_bet(BET_0_27X_POT, (int)std::lround(eff_pot * 0.27f));
-        add_bet(BET_THIRD_POT, eff_pot / 3);
-        add_bet(BET_HALF_POT,  eff_pot / 2);
-        add_bet(BET_FULL_POT,  eff_pot);
-        add_bet(BET_1_72X_POT, (int)std::lround(eff_pot * 1.72f));
-        add_bet(BET_2X_POT,    eff_pot * 2);
+            add_bet(BET_0_27X_POT, (int)std::lround(eff_pot * 0.27f));
+            add_bet(BET_THIRD_POT, eff_pot / 3);
+            add_bet(BET_HALF_POT,  eff_pot / 2);
+            add_bet(BET_FULL_POT,  eff_pot);
+            add_bet(BET_1_72X_POT, (int)std::lround(eff_pot * 1.72f));
+            add_bet(BET_2X_POT,    eff_pot * 2);
+        }
+        // ALL_IN is always available when the player has chips, even past the
+        // raise cap — committing all chips is not a re-raise in the usual sense.
         acts.acts[acts.n++] = ALL_IN;
     }
     return acts;
@@ -92,7 +99,7 @@ GameState GameState::apply_action(int action_idx) const {
         next.done_ = true;
         for (int i = 0; i < N_PLAYERS; i++)
             next.payoffs_[i] = (i < n_players_)
-                ? (float)(result.final_stacks[i] - INITIAL_STACK) : 0.0f;
+                ? (float)(result.final_stacks[i] - INITIAL_STACK) / INITIAL_STACK : 0.0f;
     } else {
         next.state_ = std::move(result.state);
     }
@@ -233,7 +240,8 @@ float mccfr(const GameState& state,
 
     // Instantaneous regret
     RegretSample rs;
-    rs.state = fvec;
+    rs.state  = fvec;
+    rs.weight = (float)iteration_t;
     std::fill(rs.regrets, rs.regrets + N_ACTIONS, 0.0f);
     for (int a : legal) rs.regrets[a] = action_evs[a] - node_ev;
     regret_buf.push_back(rs);
