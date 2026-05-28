@@ -63,7 +63,7 @@ STRATEGY_BUF_CAP = 4_000_000
 
 # ── Training loop ─────────────────────────────────────────────────────────
 K_ITERATIONS      = 100
-GAMES_PER_ITER    = 5_000
+GAMES_PER_ITER    = 10_000
 BATCH_SIZE        = 4_096
 LEARNING_RATE     = 1e-3
 REGRET_TRAIN_STEPS    = 5_000  # SGD steps per iteration on regret net
