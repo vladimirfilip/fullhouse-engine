@@ -36,6 +36,9 @@ from .config import (
     MODEL_FILENAME, N_WORKERS,
     INPUT_DIM, N_ACTIONS,
 )
+
+STRATEGY_CKPT_EVERY  = 5     # train+export strategy net every N iterations
+STRATEGY_CKPT_STEPS  = 2_000 # quick mid-run training steps (vs 15k final)
 from .networks import make_regret_net, make_strategy_net
 from .export import export_net
 
@@ -259,6 +262,21 @@ def train(
         old = os.path.join(ckpt_dir, f"regret_net_iter_{t - 3}.npz")
         if os.path.exists(old):
             os.remove(old)
+
+        # ── Periodic strategy net snapshot ────────────────────────────────────
+        # Train a fresh strategy net on the accumulated buffer and export it to
+        # gto_strategy.npz every STRATEGY_CKPT_EVERY iterations so the bot has
+        # a usable model even if the run is interrupted before completion.
+        if t % STRATEGY_CKPT_EVERY == 0 and cpp_buffers.strategy_ready(BATCH_SIZE):
+            print(f"  Strategy snapshot (iter {t}, {STRATEGY_CKPT_STEPS} steps)…")
+            snap_net = make_strategy_net().to(device)
+            _train_strategy(snap_net, cpp_buffers, STRATEGY_CKPT_STEPS, device)
+            out_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+            os.makedirs(out_dir, exist_ok=True)
+            snap_path = os.path.join(out_dir, MODEL_FILENAME + ".npz")
+            export_net(snap_net, snap_path)
+            print(f"  Strategy snapshot -> {os.path.abspath(snap_path)}")
+            del snap_net
 
     # ── Final strategy net training ────────────────────────────────────────
     if cpp_buffers.strategy_ready(BATCH_SIZE):

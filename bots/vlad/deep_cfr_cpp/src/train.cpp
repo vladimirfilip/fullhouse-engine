@@ -6,20 +6,6 @@
 
 // ── Worker ────────────────────────────────────────────────────────────────────
 
-// Player-count distribution matching train.py (weights [5,10,15,20,50])
-static int sample_n_players(std::mt19937& rng) {
-    static const int counts[]  = {2,3,4,5,6};
-    static const int weights[] = {5,10,15,20,50};
-    static const int total     = 5+10+15+20+50; // 100
-    int r = std::uniform_int_distribution<int>(0, total - 1)(rng);
-    int cumul = 0;
-    for (int i = 0; i < 5; i++) {
-        cumul += weights[i];
-        if (r < cumul) return counts[i];
-    }
-    return 6;
-}
-
 // Workers write directly into shared reservoir buffers (thread-safe via ReservoirBuffer::add).
 // Local vectors are per-game and cleared after each game, keeping peak memory proportional
 // to one game's worth of samples (a few MB) rather than all n_games (potentially GBs).
@@ -33,7 +19,9 @@ static void run_worker(int n_games, uint32_t seed, int iteration_t, const MLP& r
     local_strategy.reserve(8000);
 
     for (int g = 0; g < n_games; g++) {
-        int n_p = sample_n_players(rng);
+        // Competition is always 6-player; training on 2–5 player games wastes
+        // capacity and distorts positional features.
+        constexpr int n_p = N_PLAYERS;
         // Deal once; traverse for every seat (same optimization as train.py)
         GameState initial(n_p);
         GameState dealt = initial.sample_chance_event(rng);
