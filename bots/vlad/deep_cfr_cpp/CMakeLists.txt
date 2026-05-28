@@ -12,7 +12,15 @@ endif()
 if(MSVC)
   add_compile_options(/O2 /arch:AVX2 /fp:fast /W3)
 else()
-  add_compile_options(-O3 -march=native -ffast-math -Wall -Wextra -Wno-unused-parameter)
+  add_compile_options(
+    -O3 -march=native -ffast-math
+    # Allow inlining/devirtualisation across TUs in the shared lib.
+    # Without this GCC/Clang assume any symbol could be LD_PRELOAD'd and refuse
+    # to inline even with LTO, killing the forward_single hot path.
+    -fno-semantic-interposition
+    -funroll-loops        # explicit on older GCC where -O3 doesn't enable it
+    -Wall -Wextra -Wno-unused-parameter
+  )
 endif()
 
 # ── Eigen (header-only, fetched automatically) ─────────────────────────────
@@ -61,4 +69,16 @@ target_include_directories(deep_cfr_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(deep_cfr_gen PRIVATE Eigen3::Eigen Threads::Threads)
 if(MSVC)
   target_compile_options(deep_cfr_gen PRIVATE /O2 /arch:AVX2 /fp:fast)
+endif()
+
+# ── Link-Time Optimisation ────────────────────────────────────────────────────
+# Enables cross-TU inlining: forward_single (network.cpp), build_feature_vector
+# (features.cpp), and the Eigen GEMV can all be seen in one pass and inlined
+# into the mccfr.cpp hot path. MSVC: /GL + /LTCG. GCC/Clang: -flto.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_msg LANGUAGES CXX)
+if(_ipo_ok)
+  set_target_properties(deep_cfr_gen PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+  message(STATUS "LTO unavailable: ${_ipo_msg}")
 endif()

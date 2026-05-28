@@ -23,7 +23,7 @@ static int sample_n_players(std::mt19937& rng) {
 // Workers write directly into shared reservoir buffers (thread-safe via ReservoirBuffer::add).
 // Local vectors are per-game and cleared after each game, keeping peak memory proportional
 // to one game's worth of samples (a few MB) rather than all n_games (potentially GBs).
-static void run_worker(int n_games, uint32_t seed, int iteration_t, MLP regret_net,
+static void run_worker(int n_games, uint32_t seed, int iteration_t, const MLP& regret_net,
                        ReservoirBuffer<RegretSample>&   regret_buf,
                        ReservoirBuffer<StrategySample>& strategy_buf) {
     std::mt19937 rng(seed);

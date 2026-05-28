@@ -42,45 +42,51 @@ MLP make_regret_net()   { return make_net(false); }
 MLP make_strategy_net() { return make_net(true);  }
 
 // ── Forward pass (batch=1) ────────────────────────────────────────────────────
-// MCCFR calls this millions of times per iteration. Each call previously
-// heap-allocated N_LAYERS+1 Eigen::VectorXf temporaries; here we reuse a pair
-// of thread-local scratch buffers (ping-pong A/B) sized to the widest layer
-// (HIDDEN_DIM, which exceeds INPUT_DIM and N_ACTIONS).
+// MCCFR calls this millions of times per iteration. Three thread-local buffers,
+// none ever resized: a/b ping-pong at HIDDEN_DIM for hidden layers, out_buf at
+// N_ACTIONS for the output layer. Layer 0 uses Eigen::Map over the FeatureVec
+// (zero-copy) so there is no element-by-element input copy either.
 std::array<float, N_ACTIONS> forward_single(const MLP& net, const FeatureVec& x) {
     thread_local Eigen::VectorXf a(HIDDEN_DIM);
     thread_local Eigen::VectorXf b(HIDDEN_DIM);
+    thread_local Eigen::VectorXf out_buf(N_ACTIONS);
 
-    int in_dim = INPUT_DIM;
-    a.resize(in_dim);
-    for (int i = 0; i < in_dim; i++) a(i) = x[i];
+    // Layer 0: INPUT_DIM → HIDDEN_DIM (Map avoids copying x into a temporary)
+    {
+        const Layer& l0 = net.layers[0];
+        a.noalias() = l0.W * Eigen::Map<const Eigen::VectorXf>(x.data(), INPUT_DIM) + l0.b;
+        a = (a.array() < 0.0f).select(LEAKY_ALPHA * a, a);
+    }
     Eigen::VectorXf* cur = &a;
     Eigen::VectorXf* nxt = &b;
 
-    for (int li = 0; li < (int)net.layers.size(); li++) {
-        const Layer& l   = net.layers[li];
-        int out_dim      = (int)l.W.rows();
-        nxt->resize(out_dim);
+    // Hidden layers 1..N_LAYERS-1: HIDDEN_DIM → HIDDEN_DIM, no resize needed
+    for (int li = 1; li < (int)net.layers.size() - 1; li++) {
+        const Layer& l = net.layers[li];
         nxt->noalias() = l.W * (*cur) + l.b;
-        bool is_last = (li == (int)net.layers.size() - 1);
-        if (!is_last) {
-            *nxt = (nxt->array() < 0.0f).select(LEAKY_ALPHA * (*nxt), *nxt);
-        }
+        *nxt = (nxt->array() < 0.0f).select(LEAKY_ALPHA * (*nxt), *nxt);
         std::swap(cur, nxt);
+    }
+
+    // Output layer: HIDDEN_DIM → N_ACTIONS into fixed-size out_buf
+    {
+        const Layer& lo = net.layers.back();
+        out_buf.noalias() = lo.W * (*cur) + lo.b;
     }
 
     std::array<float, N_ACTIONS> out{};
     if (net.softmax_output) {
-        float mx = cur->maxCoeff();
+        float mx = out_buf.maxCoeff();
         float sum = 0.0f;
         for (int i = 0; i < N_ACTIONS; i++) {
-            float e = std::exp((*cur)(i) - mx);
+            float e = std::exp(out_buf(i) - mx);
             out[i]  = e;
             sum    += e;
         }
         float inv = 1.0f / sum;
         for (int i = 0; i < N_ACTIONS; i++) out[i] *= inv;
     } else {
-        for (int i = 0; i < N_ACTIONS; i++) out[i] = (*cur)(i);
+        for (int i = 0; i < N_ACTIONS; i++) out[i] = out_buf(i);
     }
     return out;
 }

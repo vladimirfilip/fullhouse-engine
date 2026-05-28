@@ -132,7 +132,7 @@ def _derive_n_raises_this_street(action_log: list, n_seats: int) -> int:
         for s in seats:
             bet_this[s] = 0
         current_bet   = 0
-        last_agg_size = 0
+        last_agg_size = _BIG_BLIND   # mirrors engine.cpp advance_street()
         n_raises      = 0
 
     def open_round(initiating_seat):
@@ -458,9 +458,8 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
             if owed == 0:
                 # Check: no chips go in, EV = share of pot we expect to win
                 return equity * pot
-            # Call: win (pot + both sides of the call) equity% of the time,
-            # lose our call amount the rest
-            return equity * (pot + 2 * owed) - (1.0 - equity) * owed
+            # Call: pot already contains opponent's chips; winning nets pot+owed.
+            return equity * (pot + owed) - (1.0 - equity) * owed
         target  = _raise_target(a, pot, owed, cur, min_r)
         rs      = max(target - cur, 0)       # raise increment above current bet
         my_cost = owed + rs                  # total new chips I commit (call + raise)
@@ -468,7 +467,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
         # Fold probability: larger bet relative to pot → opponent folds more often
         fp      = min(0.10 + 0.18 * (target / max(pot + owed, 1)), 0.70)
         # EV = fold_equity (steal pot) + call_equity (win/lose at showdown)
-        return fp * pot + (1.0 - fp) * (equity * new_pot - (1.0 - equity) * my_cost)
+        return fp * pot + (1.0 - fp) * (equity * new_pot - my_cost)
 
     evs = np.array([_ev(a) for a in legal], dtype=np.float64)
     evs -= evs.min()
@@ -492,13 +491,16 @@ def _gto_decide(gs: dict) -> dict:
     vec   = _build_feature_vector(gs)
     probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
 
-    owed  = gs["amount_owed"]
-    stack = gs["your_stack"]
+    owed    = gs["amount_owed"]
+    stack   = gs["your_stack"]
+    n_raises = _derive_n_raises_this_street(
+        gs.get("action_log", []), len(gs["players"])
+    )
 
     legal = [_CHECK_CALL]
     if owed > 0:
         legal.append(_FOLD)
-    if stack > 0:
+    if stack > 0 and n_raises < _MAX_RAISES_PER_STREET:
         legal += [_0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN]
 
     action_idx = _realtime_search(gs, legal, probs)

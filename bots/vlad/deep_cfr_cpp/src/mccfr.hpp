@@ -18,6 +18,15 @@ struct StrategySample {
     float weight; // iteration_t
 };
 
+// Fixed-size action set — avoids heap allocation on every get_legal_actions() call.
+struct LegalActions {
+    int  acts[N_ACTIONS];
+    int  n = 0;
+    int  size()        const { return n; }
+    const int* begin() const { return acts; }
+    const int* end()   const { return acts + n; }
+};
+
 // GameState wraps PokerEngine — one node in the MCCFR game tree.
 // Copyable by value for fast branching (no heap allocation beyond action_log vector).
 class GameState {
@@ -27,7 +36,7 @@ public:
     // MCCFR interface
     bool is_terminal()   const;
     bool is_chance_node() const;
-    std::vector<int> get_legal_actions() const;
+    LegalActions get_legal_actions() const;
     GameState sample_chance_event(std::mt19937& rng) const;
     GameState apply_action(int abstract_idx) const;
     int   current_player() const;

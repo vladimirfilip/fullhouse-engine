@@ -49,8 +49,8 @@ struct StateDict {
     Card community_cards[5];
     int  n_community;
     int  n_players_seated;
-    std::vector<PlayerState> players;
-    std::vector<ActionEntry> action_log; // vector only built at decision points
+    PlayerState players[N_PLAYERS];      // inline — no heap alloc, trivially copyable
+    std::vector<ActionEntry> action_log; // pre-reserved; resize() never reallocates
 };
 
 struct HandResult {

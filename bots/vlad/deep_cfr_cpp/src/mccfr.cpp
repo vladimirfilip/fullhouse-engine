@@ -9,6 +9,8 @@
 GameState::GameState(int n_players)
     : started_(false), done_(false), n_players_(n_players) {
     std::fill(payoffs_, payoffs_ + N_PLAYERS, 0.0f);
+    // Pre-reserve so engine_.build_state()'s resize() never reallocates.
+    state_.action_log.reserve(MAX_HAND_ACTIONS);
 }
 
 bool GameState::is_terminal()    const { return done_; }
@@ -24,22 +26,42 @@ float GameState::get_payoff(int player) const {
     return payoffs_[player];
 }
 
-std::vector<int> GameState::get_legal_actions() const {
-    if (done_ || !started_) return {};
-    std::vector<int> acts;
-    acts.reserve(N_ACTIONS);
-    // Insert in sorted order so callers get a sorted list without a sort pass.
+LegalActions GameState::get_legal_actions() const {
+    LegalActions acts;
+    if (done_ || !started_) return acts;
+
     if (state_.amount_owed > 0)
-        acts.push_back(FOLD);           // 0
-    acts.push_back(CHECK_CALL);         // 1
+        acts.acts[acts.n++] = FOLD;
+    acts.acts[acts.n++] = CHECK_CALL;
+
     if (state_.your_stack > 0 && state_.n_raises_this_street < MAX_RAISES_PER_STREET) {
-        acts.push_back(BET_0_27X_POT);  // 2
-        acts.push_back(BET_THIRD_POT);  // 3
-        acts.push_back(BET_HALF_POT);   // 4
-        acts.push_back(BET_FULL_POT);   // 5
-        acts.push_back(BET_1_72X_POT);  // 6
-        acts.push_back(BET_2X_POT);     // 7
-        acts.push_back(ALL_IN);         // 8
+        int cur_bet      = state_.current_bet;
+        int min_r        = state_.min_raise_to;
+        int my_bet       = state_.your_bet_this_street;
+        int all_in_tot   = my_bet + state_.your_stack;
+        int eff_pot      = state_.pot + state_.amount_owed;
+        int min_raise_by = min_r - cur_bet;
+
+        // Add a bet size only if (a) it doesn't collapse to ALL_IN and
+        // (b) it isn't a duplicate of the previous size (two fractions can
+        // both clamp to the same min-raise target at shallow effective stacks).
+        int last_target = -1;
+        auto add_bet = [&](int action_idx, int raise_by_raw) {
+            int raise_by = std::max(raise_by_raw, min_raise_by);
+            int target   = cur_bet + raise_by;
+            if (target < all_in_tot && target != last_target) {
+                last_target = target;
+                acts.acts[acts.n++] = action_idx;
+            }
+        };
+
+        add_bet(BET_0_27X_POT, (int)std::lround(eff_pot * 0.27f));
+        add_bet(BET_THIRD_POT, eff_pot / 3);
+        add_bet(BET_HALF_POT,  eff_pot / 2);
+        add_bet(BET_FULL_POT,  eff_pot);
+        add_bet(BET_1_72X_POT, (int)std::lround(eff_pot * 1.72f));
+        add_bet(BET_2X_POT,    eff_pot * 2);
+        acts.acts[acts.n++] = ALL_IN;
     }
     return acts;
 }
@@ -58,22 +80,21 @@ GameState GameState::sample_chance_event(std::mt19937& rng) const {
 }
 
 GameState GameState::apply_action(int action_idx) const {
-    GameState next = *this;  // copy by value
-    RawAction raw  = next.abstract_to_raw(action_idx);
-    HandResult result = next.engine_.apply_action(next.state_.seat_to_act, raw);
-
+    // Compute raw action from *this before constructing next, so we don't
+    // copy the state_.action_log vector only to immediately overwrite it.
+    RawAction raw = abstract_to_raw(action_idx);
+    GameState next(n_players_);
+    next.engine_  = engine_;
+    next.started_ = started_;
+    std::copy(payoffs_, payoffs_ + N_PLAYERS, next.payoffs_);
+    HandResult result = next.engine_.apply_action(state_.seat_to_act, raw);
     if (result.is_complete) {
-        next.done_    = true;
-        next.state_   = {};
-        // Payoffs: (final_stack - initial_stack). Absent seats → 0.
-        for (int i = 0; i < N_PLAYERS; i++) {
-            if (i < n_players_)
-                next.payoffs_[i] = (float)(result.final_stacks[i] - INITIAL_STACK);
-            else
-                next.payoffs_[i] = 0.0f;
-        }
+        next.done_ = true;
+        for (int i = 0; i < N_PLAYERS; i++)
+            next.payoffs_[i] = (i < n_players_)
+                ? (float)(result.final_stacks[i] - INITIAL_STACK) : 0.0f;
     } else {
-        next.state_ = result.state;
+        next.state_ = std::move(result.state);
     }
     return next;
 }
@@ -153,7 +174,7 @@ float mccfr(const GameState& state,
                      iteration_t, depth + 1, rng);
 
     auto legal  = state.get_legal_actions();
-    int n_legal = (int)legal.size();
+    int n_legal = legal.n;
 
     // ── Feature vector and network forward pass ────────────────────────────────
     FeatureVec fvec = build_feature_vector(state.state_dict());
@@ -168,7 +189,8 @@ float mccfr(const GameState& state,
         pos_sum += v;
     }
     if (pos_sum > 1e-12f) {
-        for (int a : legal) strategy[a] /= pos_sum;
+        float inv = 1.0f / pos_sum;
+        for (int a : legal) strategy[a] *= inv;
     } else {
         float uniform = 1.0f / n_legal;
         for (int a : legal) strategy[a] = uniform;
@@ -178,23 +200,19 @@ float mccfr(const GameState& state,
 
     // ── Opponent node ──────────────────────────────────────────────────────────
     if (player != traverser) {
-        // Record strategy sample
         StrategySample ss;
         ss.state  = fvec;
         std::copy(strategy, strategy + N_ACTIONS, ss.strategy);
         ss.weight = (float)iteration_t;
         strategy_buf.push_back(ss);
 
-        // Sample one action proportional to strategy
-        float prob[N_ACTIONS] = {};
-        float psum = 0.0f;
-        for (int a : legal) { prob[a] = strategy[a]; psum += prob[a]; }
-        float r = std::uniform_real_distribution<float>(0.0f, psum)(rng);
-        int chosen = legal.back();
+        // strategy[] is already normalised over legal actions (sums to 1.0).
+        float r = std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
+        int chosen = legal.acts[n_legal - 1];
         float cumul = 0.0f;
-        for (int a : legal) {
-            cumul += prob[a];
-            if (r <= cumul) { chosen = a; break; }
+        for (int i = 0; i < n_legal; i++) {
+            cumul += strategy[legal.acts[i]];
+            if (r <= cumul) { chosen = legal.acts[i]; break; }
         }
         return mccfr(state.apply_action(chosen), traverser,
                      regret_net, regret_buf, strategy_buf,
