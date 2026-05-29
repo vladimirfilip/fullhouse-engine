@@ -368,6 +368,7 @@ try:
     # print(f"[bot] Loaded GTO model ({_n} layers, in={_in_dim}, out={_out_dim}) "
     #       f"from {_MODEL_PATH}", flush=True)
 except Exception as _e:
+    pass
     # print(f"[bot] GTO model not available ({_e}); using Monte Carlo fallback.", flush=True)
 
 
