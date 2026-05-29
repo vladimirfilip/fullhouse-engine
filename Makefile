@@ -1,6 +1,6 @@
 .PHONY: install install-train install-train-gpu install-system install-vm \
         build-cpp clean-cpp train train-quick \
-        demo test validate clean
+        demo test validate clean release
 
 # ── VM Python config ────────────────────────────────────────────────────────
 # install-vm pins to Python 3.10 because eval7 0.1.7 ships pre-generated C
@@ -85,22 +85,22 @@ install-vm: install-system $(VENV)/bin/python
 # venv on VMs; falls back to system python3 for local dev.
 build-cpp:
 	@echo ">> Configuring deep_cfr_cpp (Release) against $(VPY)"
-	cmake -S bots/vlad/deep_cfr_cpp -B bots/vlad/deep_cfr_cpp/build \
+	cmake -S deep_cfr_cpp -B deep_cfr_cpp/build \
 	      -DCMAKE_BUILD_TYPE=Release \
 	      -DPython3_EXECUTABLE=$(VPY)
 	@echo ">> Building deep_cfr_gen extension"
-	cmake --build bots/vlad/deep_cfr_cpp/build --config Release -j
+	cmake --build deep_cfr_cpp/build --config Release -j
 
 clean-cpp:
-	rm -rf bots/vlad/deep_cfr_cpp/build
+	rm -rf deep_cfr_cpp/build
 
 # ── Training entry points (require: install-train + build-cpp) ───────────────
 # Uses $(VENV) Python if present (VM workflow), else system python3 (local dev).
 train:
-	$(VPY) -m bots.vlad.deep_cfr.train
+	$(VPY) -m deep_cfr.train
 
 train-quick:
-	$(VPY) -m bots.vlad.deep_cfr.train --quick
+	$(VPY) -m deep_cfr.train --quick
 
 # ── Engine targets (frozen) ──────────────────────────────────────────────────
 demo:
@@ -116,3 +116,7 @@ validate:
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+
+# ── Release: package bot.py + data/ into a timestamped snapshot ─────────────
+release:
+	python3 -c "import shutil,os,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; os.makedirs(d+'/data',exist_ok=True); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); shutil.copy('bots/vlad/data/gto_strategy.npz',d+'/data/gto_strategy.npz'); print('Release ready: '+d)"

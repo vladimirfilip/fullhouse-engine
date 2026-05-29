@@ -7,7 +7,7 @@ No Docker, Redis, or Supabase needed.
 Runs real matches using the actual game engine and shows results live.
 """
 
-import sys, os, json, time, threading, uuid, random
+import sys, os, json, time, threading, uuid, random, pathlib
 sys.path.insert(0, os.path.dirname(__file__))
 
 from flask import Flask, Response, jsonify, render_template_string
@@ -20,14 +20,11 @@ app = Flask(__name__)
 # State (in-memory for demo)
 # ---------------------------------------------------------------------------
 
+_BOTS_DIR = pathlib.Path(__file__).parent / "bots"
 BOT_PATHS = {
-    # "The Aggressor":    "bots/aggressor/bot.py",
-    "The Mathematician":"bots/mathematician/bot.py",
-    "The Shark":        "bots/shark/bot.py",
-    "Template Bot A":   "bots/template/bot.py",
-    "Pot-Odds Bot B":   "bots/ref_bot_2/bot.py",
-    "Template Bot C":   "bots/template/bot.py",
-    "Vlad Bot": "bots/vlad/bot.py",
+    d.name: str(d / "bot.py")
+    for d in sorted(_BOTS_DIR.iterdir())
+    if d.is_dir() and (d / "bot.py").exists()
 }
 
 state = {

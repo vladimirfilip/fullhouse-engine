@@ -2,7 +2,7 @@
 Deep CFR training orchestrator.
 
 Usage (from repo root):
-    python -m bots.vlad.deep_cfr.train [--iters N] [--games N] [--quick] [--workers N]
+    python -m deep_cfr.train [--iters N] [--games N] [--quick] [--workers N]
 
 Outputs:
     bots/vlad/data/gto_strategy.npz   -- numpy weights for the production bot
@@ -74,7 +74,7 @@ def _parallel_generate(
     if not _USE_CPP:
         raise RuntimeError(
             "deep_cfr_gen C++ extension not found. "
-            "Build it: cmake --build bots/vlad/deep_cfr_cpp/build --target deep_cfr_gen"
+            "Build it: cmake --build deep_cfr_cpp/build --target deep_cfr_gen"
         )
 
     weights = [p.detach().cpu().numpy() for _, p in regret_net.named_parameters()]
@@ -217,7 +217,7 @@ def train(
     if not _USE_CPP:
         raise RuntimeError(
             "deep_cfr_gen C++ extension not found. "
-            "Build it: cmake --build bots/vlad/deep_cfr_cpp/build --target deep_cfr_gen"
+            "Build it: cmake --build deep_cfr_cpp/build --target deep_cfr_gen"
         )
 
     cpp_buffers  = deep_cfr_gen.DeepCFRBuffers(REGRET_BUF_CAP, STRATEGY_BUF_CAP)
@@ -271,7 +271,7 @@ def train(
             print(f"  Strategy snapshot (iter {t}, {STRATEGY_CKPT_STEPS} steps)…")
             snap_net = make_strategy_net().to(device)
             _train_strategy(snap_net, cpp_buffers, STRATEGY_CKPT_STEPS, device)
-            out_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+            out_dir = os.path.join(os.path.dirname(__file__), "..", "bots", "vlad", "data")
             os.makedirs(out_dir, exist_ok=True)
             snap_path = os.path.join(out_dir, MODEL_FILENAME + ".npz")
             export_net(snap_net, snap_path)
@@ -286,7 +286,7 @@ def train(
         print("Strategy buffer too small; saving untrained strategy net.")
 
     # ── Export ────────────────────────────────────────────────────────────
-    out_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "bots", "vlad", "data")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, MODEL_FILENAME + ".npz")
     export_net(strategy_net, out_path)

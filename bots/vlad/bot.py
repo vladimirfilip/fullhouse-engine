@@ -365,10 +365,10 @@ try:
             f"retrain required (feature vector has changed)"
         )
     _GTO_LAYERS = _layers_tmp
-    print(f"[bot] Loaded GTO model ({_n} layers, in={_in_dim}, out={_out_dim}) "
-          f"from {_MODEL_PATH}", flush=True)
+    # print(f"[bot] Loaded GTO model ({_n} layers, in={_in_dim}, out={_out_dim}) "
+    #       f"from {_MODEL_PATH}", flush=True)
 except Exception as _e:
-    print(f"[bot] GTO model not available ({_e}); using Monte Carlo fallback.", flush=True)
+    # print(f"[bot] GTO model not available ({_e}); using Monte Carlo fallback.", flush=True)
 
 
 # ── Abstract action → engine dict ─────────────────────────────────────────
@@ -421,77 +421,21 @@ def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
 
 # ── GTO decision ───────────────────────────────────────────────────────────
 
-def _raise_target(action_idx: int, pot: int, owed: int, cur_bet: int, min_r: int) -> int:
-    """Estimate total bet amount for a given abstract raise action."""
-    eff = pot + owed
-    if action_idx == _0_27X:
-        return cur_bet + max(round(eff * 0.27), min_r - cur_bet)
-    if action_idx == _THIRD:
-        return cur_bet + max(eff // 3, min_r - cur_bet)
-    if action_idx == _HALF:
-        return cur_bet + max(eff // 2, min_r - cur_bet)
-    if action_idx == _FULL:
-        return cur_bet + max(eff, min_r - cur_bet)
-    if action_idx == _1_72X:
-        return cur_bet + max(round(eff * 1.72), min_r - cur_bet)
-    if action_idx == _2X:
-        return cur_bet + max(eff * 2, min_r - cur_bet)
-    return min_r
 
 def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
     """
-    1-level EV lookahead blended with the GTO network prior.
+    GTO network with a targeted MC equity correction on the fold/call decision.
 
-    For each legal abstract action we estimate EV using MC equity plus a
-    simple fold-probability model.  The result is a soft blend (60% GTO /
-    40% EV signal) so the network still drives strategy in unclear spots while
-    the EV signal provides a grounding check.
+    Raise sizing is owned entirely by the GTO network — immediate chip EV and
+    long-run strategy EV diverge for raise sizing (range balancing, multi-street
+    value, etc.), so a crude 1-level model only corrupts those decisions.
 
-    Fold probability model for raises:
-        fp = min(0.10 + 0.18 * (target / (pot + owed)), 0.70)
-    This approximates how often a typical opponent folds to a bet of that
-    size; crude, but directionally correct (bigger bets → more folds).
+    The only EV correction applied: when facing a bet (owed > 0), shift
+    probability between FOLD and CHECK_CALL in proportion to how far our MC
+    equity sits above or below the pot odds break-even.  The shift is bounded
+    so the network's read on the full situation still dominates.
     """
-    equity = _run_mc(gs, max_iters=600)
-
-    pot   = gs["pot"]
-    owed  = gs["amount_owed"]
-    cur   = gs["current_bet"]
-    min_r = gs["min_raise_to"]
-
-    my_bet  = gs["your_bet_this_street"]
-    my_stack = gs["your_stack"]
-
-    def _ev(a: int) -> float:
-        if a == _FOLD:
-            return 0.0
-        if a == _CHECK_CALL:
-            if owed == 0:
-                # Check: no chips go in, EV = share of pot we expect to win
-                return equity * pot
-            # Call: win the pot already in the middle, or lose the call amount.
-            return equity * pot - (1.0 - equity) * owed
-        if a == _ALL_IN:
-            # All-in: commit all remaining chips.
-            all_tot  = my_bet + my_stack
-            opp_call = max(all_tot - cur, 0)
-            new_pot  = pot + my_stack + opp_call
-            fp       = min(0.10 + 0.18 * (all_tot / max(pot + owed, 1)), 0.70)
-            return fp * pot + (1.0 - fp) * (equity * new_pot - my_stack)
-        target  = _raise_target(a, pot, owed, cur, min_r)
-        rs      = max(target - cur, 0)       # raise increment above current bet
-        my_cost = owed + rs                  # total new chips I commit (call + raise)
-        new_pot = pot + my_cost + rs         # pot if opponent calls (they match rs)
-        # Fold probability: larger bet relative to pot → opponent folds more often
-        fp      = min(0.10 + 0.18 * (target / max(pot + owed, 1)), 0.70)
-        # EV = fold_equity (steal pot) + call_equity (win/lose at showdown)
-        return fp * pot + (1.0 - fp) * (equity * new_pot - my_cost)
-
-    evs = np.array([_ev(a) for a in legal], dtype=np.float64)
-    evs -= evs.min()
-    evs += 1e-8
-    ev_probs = evs / evs.sum()
-
+    # GTO distribution over legal actions.
     gto_arr = np.array([gto_probs[a] for a in legal], dtype=np.float64)
     gto_arr = np.maximum(gto_arr, 0.0)
     if gto_arr.sum() < 1e-12:
@@ -499,7 +443,29 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
     else:
         gto_arr /= gto_arr.sum()
 
-    blended = 0.6 * gto_arr + 0.4 * ev_probs
+    owed = gs["amount_owed"]
+    if owed <= 0:
+        # Check or bet — no fold/call tension, trust the network fully.
+        return legal[int(np.random.choice(len(legal), p=gto_arr))]
+
+    pot = gs["pot"]
+    equity = _run_mc(gs, max_iters=3_000)
+
+    pot_odds     = owed / (pot + owed)          # minimum equity to break even on a call
+    equity_edge  = equity - pot_odds            # + = call is profitable; − = fold preferred
+
+    fold_idx = next((i for i, a in enumerate(legal) if a == _FOLD),       None)
+    call_idx = next((i for i, a in enumerate(legal) if a == _CHECK_CALL), None)
+
+    if fold_idx is None or call_idx is None:
+        return legal[int(np.random.choice(len(legal), p=gto_arr))]
+
+    # Shift up to 20 pp between fold and call.  Positive edge → move mass from
+    # fold to call; negative edge → move mass from call to fold.
+    shift   = float(np.clip(equity_edge * 0.8, -0.20, 0.20))
+    blended = gto_arr.copy()
+    blended[fold_idx] = max(blended[fold_idx] - shift, 0.0)
+    blended[call_idx] = max(blended[call_idx] + shift, 0.0)
     blended /= blended.sum()
     return legal[int(np.random.choice(len(legal), p=blended))]
 
