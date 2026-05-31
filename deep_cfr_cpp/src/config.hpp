@@ -52,7 +52,10 @@ constexpr float ADAM_EPS   = 1e-8f;
 
 // MCCFR
 constexpr int MAX_DEPTH             = 200;
-constexpr int MAX_RAISES_PER_STREET = 4;   // cap to bound game tree; mirrors common cap rules
+// Production engine (engine/game.py) has no raise cap. Setting this high
+// matches production and prevents the training artifact where the network
+// learns that ALL_IN is the only aggressive option at the cap boundary.
+constexpr int MAX_RAISES_PER_STREET = 8;
 
 // Export
 constexpr const char* MODEL_FILENAME = "gto_strategy";

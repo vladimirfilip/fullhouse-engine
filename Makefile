@@ -1,5 +1,6 @@
 .PHONY: install install-train install-train-gpu install-system install-vm \
         build-cpp clean-cpp train train-quick \
+        train-preflop train-preflop-quick \
         demo test validate clean release
 
 # ── VM Python config ────────────────────────────────────────────────────────
@@ -101,6 +102,13 @@ train:
 
 train-quick:
 	$(VPY) -m deep_cfr.train --quick
+
+# ── Preflop tabular CFR (pure Python + eval7, no C++ required) ───────────────
+train-preflop:
+	$(VPY) -m preflop_cfr.train
+
+train-preflop-quick:
+	$(VPY) -m preflop_cfr.train --quick
 
 # ── Engine targets (frozen) ──────────────────────────────────────────────────
 demo:

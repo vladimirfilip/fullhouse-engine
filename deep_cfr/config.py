@@ -53,7 +53,7 @@ BIG_BLIND     = 100
 #   [163]     n_active / N_PLAYERS
 #   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
 INPUT_DIM  = 308
-MAX_RAISES_PER_STREET = 4    # mirrors deep_cfr_cpp/src/config.hpp
+MAX_RAISES_PER_STREET = 8    # mirrors config.hpp; production has no cap
 HIDDEN_DIM = 512
 N_LAYERS   = 4     # hidden layers
 

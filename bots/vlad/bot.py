@@ -1,68 +1,16 @@
+"""Vlad's NLHE bot — GTO network + preflop CFR table + MC fallback.
+
+decide() is called once per action and must return within 2 seconds.
+See CLAUDE.md for architecture details and submission format.
 """
 
-RULES:
-  - Implement the decide() function below. That's it.
-  - You may import any stdlib module and any library in requirements.txt
-  - You have 2 seconds to return an action or you auto-fold
-  - If your function crashes, it auto-folds for that hand
-
-NOT ALLOWED (will DQ your bot):
-  - External API calls: no Claude/OpenAI/Anthropic/Google/any HTTP. Network is
-    blocked at the container level; trying anyway is a DQ.
-  - File writes during gameplay; data/ is read-only and only at import time.
-  - subprocess / os.system / shell commands.
-  - Threading or async tricks to dodge the 2s/action signal timer.
-  - Reflection: __import__('socket'), getattr(__builtins__, 'open'),
-    eval(), exec(), compile() — do all flagged by the validator.
-  - Collusion between bots you've registered with friends — bots must play
-    independently; coordinated soft-play or chip-dumping = both DQ'd.
-  - Reading other bots' code or hole cards (you can't anyway, but trying = DQ).
-
-OPTIONAL DATA FILES (NEW):
-  Submit a .zip archive containing:
-    bot.py        (this file, required at root)
-    data/         (optional directory with .npz, .pkl, .bin, etc.)
-
-  At module-import time only, you can read from a sibling 'data/' directory:
-
-      import os
-      DATA_DIR = os.environ.get("BOT_DATA_DIR",
-                                os.path.join(os.path.dirname(__file__), "data"))
-      with open(os.path.join(DATA_DIR, "blueprint.npz"), "rb") as f:
-          BLUEPRINT = ...load(f)
-
-  Limits:
-    - Total submission (bot.py + data/) <= 250 MB
-    - data/ alone <= 200 MB
-    - bot.py <= 5 MB
-    - File access during decide() is blocked at the OS level
-
-CARD FORMAT:
-  Cards are strings like "As" (Ace of spades), "Td" (Ten of diamonds)
-  Ranks: 2 3 4 5 6 7 8 9 T J Q K A
-  Suits: s (spades) h (hearts) d (diamonds) c (clubs)
-
-RETURN FORMAT:
-  {"action": "fold"}
-  {"action": "check"}          # only valid when amount_owed == 0
-  {"action": "call"}
-  {"action": "raise", "amount": 1200}   # amount = TOTAL bet, not raise-by
-  {"action": "all_in"}
-
-  Invalid actions default to fold. Raises below min_raise_to are snapped up.
-"""
-
-# ── Imports ───────────────────────────────────────────────────────────────
+import math
 import os
 import random
 import time
 
-import math
-
 import numpy as np
 from eval7 import Card, evaluate
-
-# ─────────────────────────────────────────────────────────────────────────
 
 BOT_NAME   = "The House"
 BOT_AVATAR = "robot_1"
@@ -79,7 +27,7 @@ _MAX_RAISES_PER_STREET = 4
 
 _INPUT_DIM = 308   # must match deep_cfr/config.py and deep_cfr_cpp/src/config.hpp
 
-# ── Card encoding (must match deep_cfr/features.py) ───────────────────────
+# ── Encodings (must match deep_cfr_cpp/src/features.cpp) ─────────────────
 _CARD_IDX: dict[str, int] = {
     r + s: ri * 4 + si
     for ri, r in enumerate(RANKS)
@@ -95,6 +43,18 @@ _STREET_IDX: dict[str, int] = {
 # Abstract action indices (must match deep_cfr/config.py)
 _FOLD, _CHECK_CALL = 0, 1
 _0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN = 2, 3, 4, 5, 6, 7, 8
+
+# Raise ladder: (action_index, rb_fn) where rb_fn(eff_pot) -> raise-by amount.
+# Single source of truth for _abstract_to_raw and _legal_actions.
+# Rounding per entry matches the original C++ implementation exactly.
+_RAISE_LADDER = [
+    (_0_27X, lambda p: round(p * 0.27)),
+    (_THIRD, lambda p: p // 3),
+    (_HALF,  lambda p: p // 2),
+    (_FULL,  lambda p: p),
+    (_1_72X, lambda p: round(p * 1.72)),
+    (_2X,    lambda p: p * 2),
+]
 
 
 # ── Feature extraction (mirrors deep_cfr_cpp/src/features.cpp) ─────────────
@@ -343,7 +303,7 @@ def _numpy_forward(
 
 DATA_DIR   = os.environ.get("BOT_DATA_DIR",
              os.path.join(os.path.dirname(__file__), "data"))
-_MODEL_PATH = os.path.join(DATA_DIR, "gto_strategy.npz")
+_MODEL_PATH = os.path.join(DATA_DIR, "better_gto", "gto_strategy.npz")
 
 _GTO_LAYERS: list[tuple[np.ndarray, np.ndarray]] | None = None
 
@@ -372,6 +332,164 @@ except Exception as _e:
     # print(f"[bot] GTO model not available ({_e}); using Monte Carlo fallback.", flush=True)
 
 
+# ── Preflop CFR table (import-time load) ──────────────────────────────────
+# Mirrored from preflop_cfr/cards.py and preflop_cfr/abstraction.py.
+# bot.py cannot import from preflop_cfr/ at runtime; keep this block
+# byte-for-byte consistent with those modules.
+
+_PREFLOP_TABLE_PATH = os.path.join(DATA_DIR, "preflop_cfr", "preflop_strategy.npz")
+_PREFLOP_TABLE: dict[int, np.ndarray] | None = None
+
+# -- mirrored: hand_to_bucket (preflop_cfr/cards.py) --
+_PF_RANK_IDX: dict[str, int] = {r: i for i, r in enumerate(RANKS)}
+_PF_CARD_RANK: dict[str, int] = {r + s: _PF_RANK_IDX[r] for r in RANKS for s in SUITS}
+_PF_CARD_SUIT: dict[str, int] = {r + s: si for r in RANKS for si, s in enumerate(SUITS)}
+
+
+def _preflop_bucket(c1: str, c2: str) -> int:
+    r1, r2 = _PF_CARD_RANK[c1], _PF_CARD_RANK[c2]
+    suited  = (_PF_CARD_SUIT[c1] == _PF_CARD_SUIT[c2])
+    hi, lo  = (r1, r2) if r1 >= r2 else (r2, r1)
+    if hi == lo:
+        return 12 - hi
+    offset = 78 - hi * (hi + 1) // 2 + lo
+    return 13 + offset if suited else 91 + offset
+
+
+# -- mirrored: FNV-1a 64-bit hash (preflop_cfr/abstraction.py) --
+_PF_FNV_OFFSET = 14695981039346656037
+_PF_FNV_PRIME  = 1099511628211
+
+
+def _pf_fnv1a(data: bytes) -> int:
+    import struct
+    h = _PF_FNV_OFFSET
+    for byte in data:
+        h ^= byte
+        h  = (h * _PF_FNV_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    return struct.unpack("q", struct.pack("Q", h))[0]
+
+
+# -- mirrored: amount_to_abstract (preflop_cfr/abstraction.py) --
+_PF_ACTIVE_RAISES = [
+    (_HALF,  0.50),
+    (_FULL,  1.00),
+    (_2X,    2.00),
+    (_0_27X, 0.27),
+    (_THIRD, 1.0 / 3.0),
+    (_1_72X, 1.72),
+]
+
+
+def _pf_amount_to_abstract(raise_to: int, pot: int,
+                            current_bet: int, bet_this_street: int) -> int:
+    eff_pot    = pot + max(0, current_bet - bet_this_street)
+    raise_size = raise_to - current_bet
+    if raise_size <= 0 or eff_pot <= 0:
+        return _CHECK_CALL
+    frac = raise_size / eff_pot
+    best_idx, best_dist = _CHECK_CALL, float("inf")
+    for a_idx, target_frac in _PF_ACTIVE_RAISES:
+        dist = abs(frac - target_frac)
+        if dist < best_dist:
+            best_dist, best_idx = dist, a_idx
+    return best_idx
+
+
+# -- mirrored: infoset_key (preflop_cfr/abstraction.py) --
+def _preflop_infoset_key(gs: dict) -> int:
+    """Compute the preflop info-set hash for the current game state."""
+    al         = gs["action_log"]
+    seat       = gs["seat_to_act"]
+    n_in_game  = max(len(gs["players"]), 1)
+    dealer     = 0
+    if al and al[0].get("action") == "small_blind":
+        sb_seat = al[0]["seat"]
+        dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
+
+    hero_pos = (seat - dealer) % n_in_game
+    bucket   = _preflop_bucket(gs["your_cards"][0], gs["your_cards"][1])
+
+    # Replay action log to build history (non-blind actions only)
+    # Track pot/current_bet so we can translate raise amounts.
+    pot         = 0
+    current_bet = _BIG_BLIND
+    bets        = {}     # seat -> chips committed this street
+    history     = []
+
+    for e in al:
+        act  = e.get("action", "")
+        eseat = e["seat"]
+        amt  = e.get("amount", 0)
+
+        if act == "small_blind":
+            bets[eseat]  = amt
+            pot         += amt
+            current_bet  = max(current_bet, amt)
+            continue
+        if act == "big_blind":
+            bets[eseat]  = amt
+            pot         += amt
+            current_bet  = max(current_bet, amt)
+            continue
+
+        bst = bets.get(eseat, 0)
+
+        if act == "fold":
+            abstract = _FOLD
+        elif act in ("check", "call"):
+            abstract = _CHECK_CALL
+            bets[eseat]  = current_bet
+            pot         += max(0, current_bet - bst)
+        elif act in ("raise", "all_in"):
+            abstract     = _pf_amount_to_abstract(amt, pot, current_bet, bst)
+            pot         += amt - bst
+            current_bet  = max(current_bet, amt)
+            bets[eseat]  = amt
+        else:
+            continue
+
+        history.append((eseat, abstract))
+
+    hist_tuple = tuple(a for _, a in history)
+    raw = f"{hero_pos}|{'_'.join(map(str, hist_tuple))}|{bucket}"
+    return _pf_fnv1a(raw.encode())
+
+
+# Preflop table applicability: only use when near canonical 100bb 6-max config
+_PF_STACK_TOL = 0.25   # allow stacks within ±25% of 100bb
+
+try:
+    _pf_data = np.load(_PREFLOP_TABLE_PATH)
+    _pf_n_players = int(_pf_data["n_players"])
+    _pf_stack_bb  = int(_pf_data["stack_bb"])
+    if _pf_n_players == _N_PLAYERS and _pf_stack_bb == _INITIAL_STACK // _BIG_BLIND:
+        _pf_keys = _pf_data["keys"]
+        _pf_strat = _pf_data["strategy"]
+        _PREFLOP_TABLE = {int(k): _pf_strat[i] for i, k in enumerate(_pf_keys)}
+except Exception:
+    pass
+
+
+def _preflop_applicable(gs: dict) -> bool:
+    """Check whether the live game config is close enough to the solved 100bb 6-max."""
+    if gs.get("street") != "preflop":
+        return False
+    players = gs["players"]
+    active  = [p for p in players
+               if not p.get("is_folded") and p.get("state") != "busted"]
+    if len(active) != _N_PLAYERS:
+        return False
+    target = _INITIAL_STACK
+    for p in active:
+        stack = p["stack"]
+        if p["seat"] == gs["seat_to_act"]:
+            stack = gs["your_stack"]
+        if abs(stack - target) > target * _PF_STACK_TOL:
+            return False
+    return True
+
+
 # ── Abstract action → engine dict ─────────────────────────────────────────
 
 def _jitter_raise(target: int, min_r: int, all_tot: int, jitter: float = 0.05) -> dict:
@@ -384,43 +502,41 @@ def _jitter_raise(target: int, min_r: int, all_tot: int, jitter: float = 0.05) -
 
 
 def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
-    pot     = gs["pot"]
     owed    = gs["amount_owed"]
     cur_bet = gs["current_bet"]
     min_r   = gs["min_raise_to"]
     stack   = gs["your_stack"]
     my_bet  = gs["your_bet_this_street"]
     all_tot = my_bet + stack
-    eff_pot = pot + owed
+    eff_pot = gs["pot"] + owed
 
     if action_idx == _FOLD:
         return {"action": "fold"}
     if action_idx == _CHECK_CALL:
         return {"action": "check" if owed == 0 else "call"}
-    if action_idx == _0_27X:
-        target = cur_bet + max(round(eff_pot * 0.27), min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
-    if action_idx == _THIRD:
-        target = cur_bet + max(eff_pot // 3, min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
-    if action_idx == _HALF:
-        target = cur_bet + max(eff_pot // 2, min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
-    if action_idx == _FULL:
-        target = cur_bet + max(eff_pot, min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
-    if action_idx == _1_72X:
-        target = cur_bet + max(round(eff_pot * 1.72), min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
-    if action_idx == _2X:
-        target = cur_bet + max(eff_pot * 2, min_r - cur_bet)
-        return _jitter_raise(target, min_r, all_tot)
     if action_idx == _ALL_IN:
         return {"action": "all_in"}
+    for a_idx, rb_fn in _RAISE_LADDER:
+        if action_idx == a_idx:
+            target = cur_bet + max(rb_fn(eff_pot), min_r - cur_bet)
+            return _jitter_raise(target, min_r, all_tot)
     return {"action": "fold"}
 
 
-# ── GTO decision ───────────────────────────────────────────────────────────
+# ── Shared decision helpers ────────────────────────────────────────────────
+
+
+def _mask_probs(full_probs: np.ndarray, legal: list) -> np.ndarray:
+    """Slice full_probs to legal indices, clip negatives, normalize."""
+    arr = np.maximum(
+        np.array([full_probs[a] for a in legal], dtype=np.float64), 0.0
+    )
+    s = arr.sum()
+    if s < 1e-12:
+        arr[:] = 1.0 / len(arr)
+    else:
+        arr /= s
+    return arr
 
 
 def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
@@ -436,13 +552,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
     equity sits above or below the pot odds break-even.  The shift is bounded
     so the network's read on the full situation still dominates.
     """
-    # GTO distribution over legal actions.
-    gto_arr = np.array([gto_probs[a] for a in legal], dtype=np.float64)
-    gto_arr = np.maximum(gto_arr, 0.0)
-    if gto_arr.sum() < 1e-12:
-        gto_arr[:] = 1.0 / len(legal)
-    else:
-        gto_arr /= gto_arr.sum()
+    gto_arr = _mask_probs(gto_probs, legal)
 
     owed = gs["amount_owed"]
     if owed <= 0:
@@ -471,51 +581,85 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray) -> int:
     return legal[int(np.random.choice(len(legal), p=blended))]
 
 
-def _gto_decide(gs: dict) -> dict:
-    """Run the GTO strategy net with real-time EV blending."""
-    vec   = _build_feature_vector(gs)
-    probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
-
-    owed  = gs["amount_owed"]
-    stack = gs["your_stack"]
-    # n_raises is already encoded in vec[142]; read it back to avoid
-    # a second walk of the action log.
-    n_raises = round(vec[142] * _MAX_RAISES_PER_STREET)
+def _legal_actions(gs: dict, n_raises: int) -> list:
+    """Return list of abstract action indices legal in the current state."""
+    owed    = gs["amount_owed"]
+    stack   = gs["your_stack"]
+    cur     = gs["current_bet"]
+    min_r   = gs["min_raise_to"]
+    my_bet  = gs.get("your_bet_this_street", 0)
+    all_tot = my_bet + stack
+    eff_pot = gs["pot"] + owed
+    min_rb  = min_r - cur
 
     legal = [_CHECK_CALL]
     if owed > 0:
         legal.append(_FOLD)
     if stack > 0:
         if n_raises < _MAX_RAISES_PER_STREET:
-            # Mirror the C++ deduplication in get_legal_actions():
-            #   • drop any bet whose target >= all_in_tot (would collapse to
-            #     all-in, duplicating the explicit ALL_IN entry below)
-            #   • skip duplicate targets (two fractions can clamp to the same
-            #     min-raise at shallow effective stacks)
-            pot      = gs["pot"]
-            eff_pot  = pot + owed
-            cur      = gs["current_bet"]
-            min_r    = gs["min_raise_to"]
-            my_bet   = gs.get("your_bet_this_street", 0)
-            all_tot  = my_bet + stack
-            min_rb   = min_r - cur
             last_tgt = -1
-            for a_idx, rb_raw in (
-                (_0_27X, round(eff_pot * 0.27)),
-                (_THIRD, eff_pot // 3),
-                (_HALF,  eff_pot // 2),
-                (_FULL,  eff_pot),
-                (_1_72X, round(eff_pot * 1.72)),
-                (_2X,    eff_pot * 2),
-            ):
-                rb  = max(rb_raw, min_rb)
+            for a_idx, rb_fn in _RAISE_LADDER:
+                rb  = max(rb_fn(eff_pot), min_rb)
                 tgt = cur + rb
                 if tgt < all_tot and tgt != last_tgt:
                     last_tgt = tgt
                     legal.append(a_idx)
-        # ALL_IN is always legal when the player has chips, even past the
-        # raise cap — committing all chips is not a standard re-raise.
         legal.append(_ALL_IN)
+    return legal
+
+
+def _preflop_table_decide(gs: dict) -> dict | None:
+    """
+    Attempt a preflop decision from the tabular CFR table.
+    Returns None when the table is unavailable or the live config is out of scope.
+    """
+    if _PREFLOP_TABLE is None:
+        return None
+    if not _preflop_applicable(gs):
+        return None
+
+    key = _preflop_infoset_key(gs)
+    if key not in _PREFLOP_TABLE:
+        return None
+
+    probs = _PREFLOP_TABLE[key]   # float32[9]
+
+    n_raises = _derive_n_raises_this_street(gs["action_log"], len(gs["players"]))
+    legal = _legal_actions(gs, n_raises)
+
+    arr = _mask_probs(probs, legal)
+    action_idx = legal[int(np.random.choice(len(legal), p=arr))]
+    return _abstract_to_raw(action_idx, gs)
+
+
+# ── GTO decision ──────────────────────────────────────────────────────────
+
+
+def _gto_decide(gs: dict) -> dict:
+    """Run the GTO strategy net with real-time EV blending."""
+    # Preflop tabular CFR table takes priority when applicable.
+    pf = _preflop_table_decide(gs)
+    if pf is not None:
+        return pf
+
+    vec   = _build_feature_vector(gs)
+    probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
+
+    stack    = gs["your_stack"]
+    n_raises = _derive_n_raises_this_street(gs["action_log"], len(gs["players"]))
+    legal    = _legal_actions(gs, n_raises)
+
+    # Dampen ALL_IN and large overbets in raise wars when stack is still deep.
+    # The training cap (4 raises/street) forces {FOLD,CALL,ALL_IN} at n_raises=4,
+    # making the network assign inflated ALL_IN mass in re-raise spots.  Suppress
+    # it proportionally when there's still meaningful stack to play (SPR > 2).
+    if n_raises >= 2 and stack > 0:
+        spr = stack / max(gs["pot"], 1)
+        if spr > 2.0:
+            scale = min((spr - 2.0) / 4.0, 1.0)   # ramps 0→1 from SPR 2 to 6
+            dampen = 1.0 - 0.75 * scale             # 1.0 at SPR=2, 0.25 at SPR≥6
+            for _a in (_ALL_IN, _2X, _1_72X):
+                probs[_a] = probs[_a] * dampen
 
     action_idx = _realtime_search(gs, legal, probs)
     return _abstract_to_raw(action_idx, gs)
@@ -580,7 +724,10 @@ def choose_action(mc_equity, pot, amount_owed, already_bet, min_raise_to, your_s
     return {"action": "check"} if amount_owed == 0 else {"action": "call"}
 
 
-def _profile_opponents(match_log: list, players: list, my_seat: int) -> dict:
+def _opponent_profile_counts(
+    match_log: list, players: list, my_seat: int
+) -> tuple[int, int, int]:
+    """Return (maniac_count, calling_station_count, nit_count) among active opponents."""
     my_bot_id = next((p["bot_id"] for p in players if p["seat"] == my_seat), None)
     counts: dict[str, dict] = {}
     for entry in match_log:
@@ -589,7 +736,9 @@ def _profile_opponents(match_log: list, players: list, my_seat: int) -> dict:
             continue
         act = entry.get("action", "")
         if bid not in counts:
-            counts[bid] = {"fold": 0, "check": 0, "call": 0, "raise": 0, "all_in": 0, "total": 0}
+            counts[bid] = {
+                "fold": 0, "check": 0, "call": 0, "raise": 0, "all_in": 0, "total": 0
+            }
         if act in counts[bid]:
             counts[bid][act] += 1
         counts[bid]["total"] += 1
@@ -599,8 +748,7 @@ def _profile_opponents(match_log: list, players: list, my_seat: int) -> dict:
         t = c["total"]
         if t < 5:
             profiles[bid] = "unknown"
-            continue
-        if (c["all_in"] + c["raise"]) / t > 0.50:
+        elif (c["all_in"] + c["raise"]) / t > 0.50:
             profiles[bid] = "maniac"
         elif c["call"] / t > 0.50:
             profiles[bid] = "calling_station"
@@ -608,22 +756,19 @@ def _profile_opponents(match_log: list, players: list, my_seat: int) -> dict:
             profiles[bid] = "nit"
         else:
             profiles[bid] = "normal"
-    return profiles
 
-
-def _count_active_profiles(profiles: dict, players: list, my_seat: int) -> tuple[int, int, int]:
-    maniac_count = station_count = nit_count = 0
+    maniac = station = nit = 0
     for p in players:
         if p["seat"] == my_seat or p["state"] in ("folded", "busted"):
             continue
         label = profiles.get(p["bot_id"], "unknown")
         if label == "maniac":
-            maniac_count += 1
+            maniac += 1
         elif label == "calling_station":
-            station_count += 1
+            station += 1
         elif label == "nit":
-            nit_count += 1
-    return maniac_count, station_count, nit_count
+            nit += 1
+    return maniac, station, nit
 
 
 def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = None) -> float:
@@ -665,12 +810,6 @@ def decide(game_state: dict) -> dict:
     np.random.seed(_seed)
 
     my_seat = game_state["seat_to_act"]
-    profiles = _profile_opponents(
-        game_state.get("match_action_log", []), game_state["players"], my_seat
-    )
-    maniac_count, station_count, nit_count = _count_active_profiles(
-        profiles, game_state["players"], my_seat
-    )
 
     # ── GTO path ──────────────────────────────────────────────────────────
     if _GTO_LAYERS is not None:
@@ -680,6 +819,9 @@ def decide(game_state: dict) -> dict:
             pass
 
     # ── Monte Carlo fallback ───────────────────────────────────────────────
+    maniac_count, station_count, nit_count = _opponent_profile_counts(
+        game_state.get("match_action_log", []), game_state["players"], my_seat
+    )
     equity = _run_mc(game_state, time_limit=0.5)
     pot    = game_state["pot"]
     active = sum(p["state"] == "active" for p in game_state["players"])

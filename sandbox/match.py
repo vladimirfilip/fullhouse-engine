@@ -255,6 +255,10 @@ def run_match(match_id, bot_paths, n_hands=400, verbose=False, seed=None):
                 seed           = hand_seed,
             )
 
+            if verbose:
+                stacks_str = "  ".join(bid + "=" + str(stacks[bid]) for bid in alive)
+                print("\n--- Hand " + str(hand_num + 1) + "/" + str(n_hands) + "  " + stacks_str + " ---", file=sys.stderr)
+
             result = _play_hand(engine, procs, alive, match_action_log, hand_num, verbose)
             hand_log.append({"hand_num": hand_num, "hand_id": hand_id, **result})
 

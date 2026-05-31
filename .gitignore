@@ -20,7 +20,7 @@ node_modules/
 .claude/settings.local.json
 
 # C++ build artifacts
-bots/vlad/deep_cfr_cpp/build/
+deep_cfr_cpp/build/
 
 # Trained model weights — kept local, not pushed
 *.npz
@@ -33,3 +33,6 @@ bots/vlad.zip
 # IDE / local tooling
 .idea/
 .streak/
+.pytest_cache/
+
+tournament_logs/

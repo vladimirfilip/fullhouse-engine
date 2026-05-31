@@ -41,6 +41,12 @@ make train
 # Smoke-test training run (5 iters × 200 games)
 make train-quick
 
+# Train preflop tabular CFR (pure Python, no C++ required)
+make train-preflop
+
+# Smoke-test preflop CFR (5,000 traversals)
+make train-preflop-quick
+
 # Clean compiled artifacts
 make clean
 make clean-cpp
@@ -106,6 +112,30 @@ Loads a pre-trained GTO strategy network at import time (`bots/vlad/data/gto_str
 | [158:163] | Board texture: flush-draw, monotone, paired, two-paired, connected |
 | [163] | n_active players (normalised) |
 | [164:308] | Action history: 24 slots × 6 floats (seat, 4-action one-hot, amount) |
+
+### `preflop_cfr/` — Tabular Preflop Solver
+
+Pure-Python tabular External-Sampling MCCFR for the canonical **6-handed 100bb** preflop game. Requires only `eval7` + `numpy` (no PyTorch, no C++). Produces `bots/vlad/data/preflop_cfr/preflop_strategy.npz`.
+
+**Key files:**
+- **`config.py`** — hyperparameters: `PREFLOP_ACTIONS` (active subset of the 9-action space), `ITERATIONS`, equity-table settings, export/checkpoint paths.
+- **`cards.py`** — 169-bucket hand canonicalization (`hand_to_bucket`); `fresh_deck`, `deal_hands`, suit-isomorphic cache key.
+- **`abstraction.py`** — `infoset_key` (FNV-1a 64-bit hash of `position|history|bucket`); `amount_to_abstract` (maps observed bet sizes to the nearest abstract action). **Single source of truth** — `bot.py` contains a mirrored copy of these functions.
+- **`equity.py`** — Lazy-built 169×169 HU equity table; cached multiway MC rollout via `eval7.evaluate`.
+- **`game.py`** — `PreflopState` dataclass + `make_initial_state`, `legal_actions`, `apply_action`, `is_terminal`, `terminal_utilities`. Mirrors engine blind/seat rules and `bot.py` sizing exactly.
+- **`cfr.py`** — `run_iteration(traverser, regret_sum, strategy_sum)`: one ES-MCCFR traversal. Opponent nodes sample one action; traverser nodes enumerate all and accumulate regrets.
+- **`export.py`** — `export_strategy` → `.npz` (no pickle); `save_checkpoint`/`load_checkpoint` for resumable training.
+- **`train.py`** — CLI loop with multiprocessing workers, periodic checkpointing, and a spot-check range printout at the end.
+
+**Training CLI:**
+```bash
+python -m preflop_cfr.train              # full run (500k traversals)
+python -m preflop_cfr.train --quick      # smoke test (5k traversals)
+python -m preflop_cfr.train --iters 100000 --workers 8
+python -m preflop_cfr.train --resume     # resume from checkpoint
+```
+
+**`bot.py` integration:** at import time, `bot.py` loads the table into `_PREFLOP_TABLE`. The `_preflop_table_decide` hook fires before the GTO net whenever `street == "preflop"` AND the live config matches (6 active players, stacks ≈ 100bb ±25%). The info-set key helpers (`_preflop_bucket`, `_preflop_infoset_key`) are self-contained mirrors of `abstraction.py` — any change to the key encoding must be reflected in both.
 
 ### `deep_cfr/` — Python Training Orchestration
 
