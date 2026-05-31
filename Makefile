@@ -114,10 +114,10 @@ train-quick:
 
 # ── Preflop tabular CFR (pure Python + eval7, no C++ required) ───────────────
 train-preflop:
-	$(VPY) -m preflop_cfr.train >> train.log 2>&1
+	$(VPY) -m preflop_cfr.train --mem-budget-gb 10 >> train.log 2>&1
 
 train-preflop-quick:
-	$(VPY) -m preflop_cfr.train --quick
+	$(VPY) -m preflop_cfr.train --quick --mem-budget-gb 10
 
 # ── Engine targets (frozen) ──────────────────────────────────────────────────
 demo:

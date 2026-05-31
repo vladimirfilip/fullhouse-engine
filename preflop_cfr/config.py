@@ -35,6 +35,13 @@ PRUNE_MIN_VISITS   = 10        # drop info sets visited < N times at export
 # Parallel mode: iterations between cross-worker merges. Smaller = closer to
 # true sequential CFR (less worker divergence) but more broadcast overhead.
 SYNC_EVERY         = 20_000
+# Parallel mode RAM budget (GB) for the live regret/strategy tables and their
+# per-worker copies.  Each round the trainer caps the number of concurrent
+# workers so that  workers × (~3 × table_size)  stays under this budget.  As the
+# tables grow over a long run the effective worker count scales down, which is
+# what prevents the OOM-kill on the full 500k run.  Override with the
+# PREFLOP_MEM_BUDGET_GB env var or the --mem-budget-gb CLI flag.
+MEM_BUDGET_GB      = float(os.environ.get("PREFLOP_MEM_BUDGET_GB", "6"))
 
 # ── Equity tables ──────────────────────────────────────────────────────────────
 HU_EQUITY_BOARDS    = 2_000    # MC boards for 169×169 HU table build

@@ -81,36 +81,65 @@ def _worker_init():
 
 def _worker_delta(args: tuple) -> tuple[dict, dict]:
     """
-    Warm-start from the shared snapshot, run a slice of iterations on a private
-    copy, and return only the changed/new info sets (the delta to merge back).
+    Warm-start regrets from the shared snapshot, run a slice of iterations on a
+    private copy, and return the deltas to merge back.
+
+    Memory note: only ``regret_sum`` is shipped to the worker.  ``strategy_sum``
+    is *write-only* during a traversal (see cfr._traverse — it is never read to
+    make a decision), so a worker can accumulate it from empty and the result is
+    exactly the delta to add back.  Not shipping the base strategy roughly halves
+    per-worker RAM and the pickle traffic.  Regrets are turned into a delta in
+    place to avoid holding a third full table.
     """
-    n_iters, seed, base_r, base_s = args
+    n_iters, seed, base_r = args
     random.seed(seed)
     np.random.seed(seed & 0xFFFFFFFF)
 
-    # Private warm-started copies so the run evolves from the merged state.
+    # Warm-started regret copy (evolves from the merged state); strategy starts
+    # empty so its from-empty total IS the delta.
     local_r = {k: v.copy() for k, v in base_r.items()}
-    local_s = {k: v.copy() for k, v in base_s.items()}
+    local_s: dict[int, np.ndarray] = {}
 
     _run_chunk(n_iters, local_r, local_s)
 
-    delta_r = _delta(local_r, base_r)
-    delta_s = _delta(local_s, base_s)
-    return delta_r, delta_s
-
-
-def _delta(local: dict, base: dict) -> dict:
-    """Return {key: local-base} for changed keys only (new keys included)."""
-    out: dict[int, np.ndarray] = {}
-    for k, v in local.items():
-        b = base.get(k)
+    # Convert regrets to a delta in place: reuse local_r as the output so we
+    # never hold base + working + delta simultaneously.
+    for k in list(local_r.keys()):
+        b = base_r.get(k)
         if b is None:
-            out[k] = v
+            continue            # new info set: full value is the delta
+        d = local_r[k] - b
+        if d.any():
+            local_r[k] = d
         else:
-            d = v - b
-            if d.any():
-                out[k] = d
-    return out
+            del local_r[k]
+    return local_r, local_s
+
+
+def _table_nbytes(table: dict[int, np.ndarray]) -> int:
+    """
+    Rough resident size of an info-set table in bytes (array data + Python
+    object/dict/key overhead).  Used to size the per-round worker count.
+    """
+    if not table:
+        return 0
+    # 9×float64 data (72B) + ndarray object (~112B) + dict slot (~100B) + key (~28B).
+    return len(table) * (72 + 112 + 100 + 28)
+
+
+def _safe_workers(n_workers: int, regret_sum: dict, budget_gb: float) -> int:
+    """
+    Cap concurrent workers so peak RAM stays under budget.  Each worker holds
+    roughly: warm-started regrets + accumulated strategy + the regret pickle
+    in flight ≈ 3 × table_size.  As the tables grow over the run this returns a
+    smaller number, which is what keeps the full run from being OOM-killed.
+    """
+    table = _table_nbytes(regret_sum)
+    if table == 0:
+        return n_workers
+    budget = budget_gb * (1024 ** 3)
+    fit = int(budget // (3 * table))
+    return max(1, min(n_workers, fit))
 
 
 def _split(total: int, parts: int) -> list[int]:
@@ -128,6 +157,7 @@ def train(
     sync_every:       int  = config.SYNC_EVERY,
     resume:           bool = False,
     verbose:          bool = True,
+    mem_budget_gb:    float = config.MEM_BUDGET_GB,
 ):
     regret_sum:   dict[int, np.ndarray] = {}
     strategy_sum: dict[int, np.ndarray] = {}
@@ -164,12 +194,21 @@ def train(
             if pool is None:
                 _run_chunk(n, regret_sum, strategy_sum)
             else:
-                counts = [c for c in _split(n, n_workers) if c > 0]
-                tasks  = [(c, random.randrange(2**31), regret_sum, strategy_sum)
+                # Cap concurrent workers to the live table size so peak RAM
+                # stays under budget — the tables grow over the run, so this
+                # scales down automatically and prevents the OOM-kill.
+                safe = _safe_workers(n_workers, regret_sum, mem_budget_gb)
+                if verbose and safe < n_workers:
+                    print(f"[preflop_cfr] table ~{_table_nbytes(regret_sum)/1e6:.0f}MB"
+                          f"  -> capping workers {n_workers}->{safe} "
+                          f"(budget {mem_budget_gb:g}GB)", flush=True)
+                counts = [c for c in _split(n, safe) if c > 0]
+                tasks  = [(c, random.randrange(2**31), regret_sum)
                           for c in counts]
                 for dr, ds in pool.map(_worker_delta, tasks):
                     _merge(regret_sum,   dr)
                     _merge(strategy_sum, ds)
+                del tasks
 
             iter_done += n
             elapsed = time.time() - t0
@@ -247,6 +286,10 @@ if __name__ == "__main__":
                         help="Iterations between cross-worker merges (parallel)")
     parser.add_argument("--resume",  action="store_true",
                         help="Resume from last checkpoint")
+    parser.add_argument("--mem-budget-gb", type=float, default=config.MEM_BUDGET_GB,
+                        help="RAM budget for table copies; caps concurrent "
+                             "workers as tables grow (default: %(default)g, "
+                             "or $PREFLOP_MEM_BUDGET_GB)")
     parser.add_argument("--quiet",   action="store_true")
     args = parser.parse_args()
 
@@ -259,4 +302,5 @@ if __name__ == "__main__":
         sync_every       = args.sync,
         resume           = args.resume,
         verbose          = not args.quiet,
+        mem_budget_gb    = args.mem_budget_gb,
     )
