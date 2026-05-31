@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c \"import numpy, eval7; print\\('deps OK numpy', numpy.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe run_tournament.py --bots vlad vlad_gto_150_iters vlad_old_gto neel neel_hybrid_plus anti_monte_carlo shark template --rounds 3 --hands 200 --workers 2 --seed 42)",
+      "Bash(.venv/Scripts/python.exe run_tournament.py --bots vlad vlad_old_gto neel --rounds 1 --hands 50 --workers 1 --seed 99 --verbose)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(VLAD_POSTFLOP_ENGINE=mc .venv/Scripts/python.exe run_tournament.py --bots vlad vlad_old_gto neel neel_hybrid_plus anti_monte_carlo --rounds 3 --hands 200 --workers 2 --seed 77)",
+      "Bash(.venv/Scripts/python.exe run_tournament.py --bots vlad vlad_old_gto neel neel_hybrid_plus anti_monte_carlo --rounds 3 --hands 200 --workers 2 --seed 77)"
+    ]
+  }
+}

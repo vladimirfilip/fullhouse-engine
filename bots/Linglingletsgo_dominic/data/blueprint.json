@@ -1,0 +1,1791 @@
+{
+  "metadata": {
+    "combo_count": 1326,
+    "description": "Compact blueprint thresholds for Fullhouse 6-max NLHE bot.",
+    "hand_class_count": 169,
+    "version": 1
+  },
+  "postflop_thresholds": {
+    "flop": {
+      "continue": 0.42,
+      "semi_bluff": 0.34,
+      "value_bet": 0.78
+    },
+    "river": {
+      "continue": 0.52,
+      "semi_bluff": 1.0,
+      "value_bet": 0.84
+    },
+    "turn": {
+      "continue": 0.46,
+      "semi_bluff": 0.38,
+      "value_bet": 0.8
+    }
+  },
+  "preflop": {
+    "22": {
+      "call_threshold": 0.4535,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.4875,
+      "strength": 0.5125,
+      "three_bet_threshold": 0.5623
+    },
+    "32o": {
+      "call_threshold": 0.694,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.95,
+      "strength": 0.05,
+      "three_bet_threshold": 0.849
+    },
+    "32s": {
+      "call_threshold": 0.6673,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8987,
+      "strength": 0.1013,
+      "three_bet_threshold": 0.8172
+    },
+    "33": {
+      "call_threshold": 0.4372,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.4563,
+      "strength": 0.5437,
+      "three_bet_threshold": 0.5429
+    },
+    "42o": {
+      "call_threshold": 0.694,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.95,
+      "strength": 0.05,
+      "three_bet_threshold": 0.849
+    },
+    "42s": {
+      "call_threshold": 0.6818,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.9265,
+      "strength": 0.0735,
+      "three_bet_threshold": 0.8344
+    },
+    "43o": {
+      "call_threshold": 0.6754,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9142,
+      "strength": 0.0858,
+      "three_bet_threshold": 0.8268
+    },
+    "43s": {
+      "call_threshold": 0.6338,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8342,
+      "strength": 0.1658,
+      "three_bet_threshold": 0.7772
+    },
+    "44": {
+      "call_threshold": 0.421,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.425,
+      "strength": 0.575,
+      "three_bet_threshold": 0.5235
+    },
+    "52o": {
+      "call_threshold": 0.694,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.95,
+      "strength": 0.05,
+      "three_bet_threshold": 0.849
+    },
+    "52s": {
+      "call_threshold": 0.665,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8942,
+      "strength": 0.1058,
+      "three_bet_threshold": 0.8144
+    },
+    "53o": {
+      "call_threshold": 0.6898,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9419,
+      "strength": 0.0581,
+      "three_bet_threshold": 0.844
+    },
+    "53s": {
+      "call_threshold": 0.6482,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8619,
+      "strength": 0.1381,
+      "three_bet_threshold": 0.7944
+    },
+    "54o": {
+      "call_threshold": 0.6418,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8497,
+      "strength": 0.1503,
+      "three_bet_threshold": 0.7868
+    },
+    "54s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "55": {
+      "call_threshold": 0.4047,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.3938,
+      "strength": 0.6062,
+      "three_bet_threshold": 0.5041
+    },
+    "62o": {
+      "call_threshold": 0.6898,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9419,
+      "strength": 0.0581,
+      "three_bet_threshold": 0.844
+    },
+    "62s": {
+      "call_threshold": 0.6482,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8619,
+      "strength": 0.1381,
+      "three_bet_threshold": 0.7944
+    },
+    "63o": {
+      "call_threshold": 0.673,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9097,
+      "strength": 0.0903,
+      "three_bet_threshold": 0.824
+    },
+    "63s": {
+      "call_threshold": 0.6314,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8297,
+      "strength": 0.1703,
+      "three_bet_threshold": 0.7744
+    },
+    "64o": {
+      "call_threshold": 0.6563,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8774,
+      "strength": 0.1226,
+      "three_bet_threshold": 0.804
+    },
+    "64s": {
+      "call_threshold": 0.6147,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7974,
+      "strength": 0.2026,
+      "three_bet_threshold": 0.7544
+    },
+    "65o": {
+      "call_threshold": 0.6083,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7852,
+      "strength": 0.2148,
+      "three_bet_threshold": 0.7468
+    },
+    "65s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "66": {
+      "call_threshold": 0.3885,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.3625,
+      "strength": 0.6375,
+      "three_bet_threshold": 0.4848
+    },
+    "72o": {
+      "call_threshold": 0.6808,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9247,
+      "strength": 0.0753,
+      "three_bet_threshold": 0.8333
+    },
+    "72s": {
+      "call_threshold": 0.6392,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8447,
+      "strength": 0.1553,
+      "three_bet_threshold": 0.7837
+    },
+    "73o": {
+      "call_threshold": 0.6563,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8774,
+      "strength": 0.1226,
+      "three_bet_threshold": 0.804
+    },
+    "73s": {
+      "call_threshold": 0.6147,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7974,
+      "strength": 0.2026,
+      "three_bet_threshold": 0.7544
+    },
+    "74o": {
+      "call_threshold": 0.6395,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8452,
+      "strength": 0.1548,
+      "three_bet_threshold": 0.784
+    },
+    "74s": {
+      "call_threshold": 0.5979,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7652,
+      "strength": 0.2348,
+      "three_bet_threshold": 0.7344
+    },
+    "75o": {
+      "call_threshold": 0.6227,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8129,
+      "strength": 0.1871,
+      "three_bet_threshold": 0.764
+    },
+    "75s": {
+      "call_threshold": 0.5811,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7329,
+      "strength": 0.2671,
+      "three_bet_threshold": 0.7144
+    },
+    "76o": {
+      "call_threshold": 0.5747,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7206,
+      "strength": 0.2794,
+      "three_bet_threshold": 0.7068
+    },
+    "76s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "77": {
+      "call_threshold": 0.3722,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.3313,
+      "strength": 0.6687,
+      "three_bet_threshold": 0.4654
+    },
+    "82o": {
+      "call_threshold": 0.6719,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.9074,
+      "strength": 0.0926,
+      "three_bet_threshold": 0.8226
+    },
+    "82s": {
+      "call_threshold": 0.6303,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8274,
+      "strength": 0.1726,
+      "three_bet_threshold": 0.773
+    },
+    "83o": {
+      "call_threshold": 0.6473,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8602,
+      "strength": 0.1398,
+      "three_bet_threshold": 0.7933
+    },
+    "83s": {
+      "call_threshold": 0.6057,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7802,
+      "strength": 0.2198,
+      "three_bet_threshold": 0.7437
+    },
+    "84o": {
+      "call_threshold": 0.6227,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8129,
+      "strength": 0.1871,
+      "three_bet_threshold": 0.764
+    },
+    "84s": {
+      "call_threshold": 0.5811,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7329,
+      "strength": 0.2671,
+      "three_bet_threshold": 0.7144
+    },
+    "85o": {
+      "call_threshold": 0.6059,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7806,
+      "strength": 0.2194,
+      "three_bet_threshold": 0.744
+    },
+    "85s": {
+      "call_threshold": 0.5643,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7006,
+      "strength": 0.2994,
+      "three_bet_threshold": 0.6944
+    },
+    "86o": {
+      "call_threshold": 0.5892,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7484,
+      "strength": 0.2516,
+      "three_bet_threshold": 0.724
+    },
+    "86s": {
+      "call_threshold": 0.5476,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6684,
+      "strength": 0.3316,
+      "three_bet_threshold": 0.6744
+    },
+    "87o": {
+      "call_threshold": 0.5412,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6561,
+      "strength": 0.3439,
+      "three_bet_threshold": 0.6668
+    },
+    "87s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "88": {
+      "call_threshold": 0.3352,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "92o": {
+      "call_threshold": 0.6629,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8902,
+      "strength": 0.1098,
+      "three_bet_threshold": 0.8119
+    },
+    "92s": {
+      "call_threshold": 0.6213,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.8102,
+      "strength": 0.1898,
+      "three_bet_threshold": 0.7623
+    },
+    "93o": {
+      "call_threshold": 0.6383,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8429,
+      "strength": 0.1571,
+      "three_bet_threshold": 0.7826
+    },
+    "93s": {
+      "call_threshold": 0.5967,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7629,
+      "strength": 0.2371,
+      "three_bet_threshold": 0.733
+    },
+    "94o": {
+      "call_threshold": 0.6137,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7956,
+      "strength": 0.2044,
+      "three_bet_threshold": 0.7533
+    },
+    "94s": {
+      "call_threshold": 0.5721,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7156,
+      "strength": 0.2844,
+      "three_bet_threshold": 0.7037
+    },
+    "95o": {
+      "call_threshold": 0.5892,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7484,
+      "strength": 0.2516,
+      "three_bet_threshold": 0.724
+    },
+    "95s": {
+      "call_threshold": 0.5476,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6684,
+      "strength": 0.3316,
+      "three_bet_threshold": 0.6744
+    },
+    "96o": {
+      "call_threshold": 0.5724,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7161,
+      "strength": 0.2839,
+      "three_bet_threshold": 0.704
+    },
+    "96s": {
+      "call_threshold": 0.5308,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6361,
+      "strength": 0.3639,
+      "three_bet_threshold": 0.6544
+    },
+    "97o": {
+      "call_threshold": 0.5556,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6839,
+      "strength": 0.3161,
+      "three_bet_threshold": 0.684
+    },
+    "97s": {
+      "call_threshold": 0.514,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6039,
+      "strength": 0.3961,
+      "three_bet_threshold": 0.6344
+    },
+    "98o": {
+      "call_threshold": 0.5076,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5916,
+      "strength": 0.4084,
+      "three_bet_threshold": 0.6268
+    },
+    "98s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "99": {
+      "call_threshold": 0.3352,
+      "class": "pair",
+      "combos": 6,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "A2o": {
+      "call_threshold": 0.5816,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7339,
+      "strength": 0.2661,
+      "three_bet_threshold": 0.715
+    },
+    "A2s": {
+      "call_threshold": 0.54,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6539,
+      "strength": 0.3461,
+      "three_bet_threshold": 0.6654
+    },
+    "A3o": {
+      "call_threshold": 0.557,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6866,
+      "strength": 0.3134,
+      "three_bet_threshold": 0.6857
+    },
+    "A3s": {
+      "call_threshold": 0.5154,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6066,
+      "strength": 0.3934,
+      "three_bet_threshold": 0.6361
+    },
+    "A4o": {
+      "call_threshold": 0.5325,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6394,
+      "strength": 0.3606,
+      "three_bet_threshold": 0.6564
+    },
+    "A4s": {
+      "call_threshold": 0.4909,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5594,
+      "strength": 0.4406,
+      "three_bet_threshold": 0.6068
+    },
+    "A5o": {
+      "call_threshold": 0.5079,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5921,
+      "strength": 0.4079,
+      "three_bet_threshold": 0.6271
+    },
+    "A5s": {
+      "call_threshold": 0.4663,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5121,
+      "strength": 0.4879,
+      "three_bet_threshold": 0.5775
+    },
+    "A6o": {
+      "call_threshold": 0.4833,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5448,
+      "strength": 0.4552,
+      "three_bet_threshold": 0.5978
+    },
+    "A6s": {
+      "call_threshold": 0.4417,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4648,
+      "strength": 0.5352,
+      "three_bet_threshold": 0.5482
+    },
+    "A7o": {
+      "call_threshold": 0.4587,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4976,
+      "strength": 0.5024,
+      "three_bet_threshold": 0.5685
+    },
+    "A7s": {
+      "call_threshold": 0.4171,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4176,
+      "strength": 0.5824,
+      "three_bet_threshold": 0.5189
+    },
+    "A8o": {
+      "call_threshold": 0.4342,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4503,
+      "strength": 0.5497,
+      "three_bet_threshold": 0.5392
+    },
+    "A8s": {
+      "call_threshold": 0.3926,
+      "class": "playable",
+      "combos": 4,
+      "open_threshold": 0.3703,
+      "strength": 0.6297,
+      "three_bet_threshold": 0.4896
+    },
+    "A9o": {
+      "call_threshold": 0.4096,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4031,
+      "strength": 0.5969,
+      "three_bet_threshold": 0.5099
+    },
+    "A9s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "AA": {
+      "call_threshold": 0.2104,
+      "class": "premium_pair",
+      "combos": 6,
+      "open_threshold": 0.02,
+      "strength": 0.98,
+      "three_bet_threshold": 0.2724
+    },
+    "AJo": {
+      "call_threshold": 0.3682,
+      "class": "playable",
+      "combos": 12,
+      "open_threshold": 0.3235,
+      "strength": 0.6765,
+      "three_bet_threshold": 0.4606
+    },
+    "AJs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "AKo": {
+      "call_threshold": 0.2416,
+      "class": "premium_broadway",
+      "combos": 12,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    },
+    "AKs": {
+      "call_threshold": 0.2416,
+      "class": "premium_broadway",
+      "combos": 4,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    },
+    "AQo": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 12,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "AQs": {
+      "call_threshold": 0.2416,
+      "class": "premium_broadway",
+      "combos": 4,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    },
+    "ATo": {
+      "call_threshold": 0.385,
+      "class": "playable",
+      "combos": 12,
+      "open_threshold": 0.3558,
+      "strength": 0.6442,
+      "three_bet_threshold": 0.4806
+    },
+    "ATs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "J2o": {
+      "call_threshold": 0.6449,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8556,
+      "strength": 0.1444,
+      "three_bet_threshold": 0.7905
+    },
+    "J2s": {
+      "call_threshold": 0.6033,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7756,
+      "strength": 0.2244,
+      "three_bet_threshold": 0.7409
+    },
+    "J3o": {
+      "call_threshold": 0.6204,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8084,
+      "strength": 0.1916,
+      "three_bet_threshold": 0.7612
+    },
+    "J3s": {
+      "call_threshold": 0.5788,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7284,
+      "strength": 0.2716,
+      "three_bet_threshold": 0.7116
+    },
+    "J4o": {
+      "call_threshold": 0.5958,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7611,
+      "strength": 0.2389,
+      "three_bet_threshold": 0.7319
+    },
+    "J4s": {
+      "call_threshold": 0.5542,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6811,
+      "strength": 0.3189,
+      "three_bet_threshold": 0.6823
+    },
+    "J5o": {
+      "call_threshold": 0.5712,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7139,
+      "strength": 0.2861,
+      "three_bet_threshold": 0.7026
+    },
+    "J5s": {
+      "call_threshold": 0.5296,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6339,
+      "strength": 0.3661,
+      "three_bet_threshold": 0.653
+    },
+    "J6o": {
+      "call_threshold": 0.5466,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6666,
+      "strength": 0.3334,
+      "three_bet_threshold": 0.6733
+    },
+    "J6s": {
+      "call_threshold": 0.505,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5866,
+      "strength": 0.4134,
+      "three_bet_threshold": 0.6237
+    },
+    "J7o": {
+      "call_threshold": 0.5221,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6194,
+      "strength": 0.3806,
+      "three_bet_threshold": 0.644
+    },
+    "J7s": {
+      "call_threshold": 0.4805,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5394,
+      "strength": 0.4606,
+      "three_bet_threshold": 0.5944
+    },
+    "J8o": {
+      "call_threshold": 0.5053,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5871,
+      "strength": 0.4129,
+      "three_bet_threshold": 0.624
+    },
+    "J8s": {
+      "call_threshold": 0.4637,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5071,
+      "strength": 0.4929,
+      "three_bet_threshold": 0.5744
+    },
+    "J9o": {
+      "call_threshold": 0.4885,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5548,
+      "strength": 0.4452,
+      "three_bet_threshold": 0.604
+    },
+    "J9s": {
+      "call_threshold": 0.4469,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4748,
+      "strength": 0.5252,
+      "three_bet_threshold": 0.5544
+    },
+    "JJ": {
+      "call_threshold": 0.2416,
+      "class": "premium_pair",
+      "combos": 6,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    },
+    "JTo": {
+      "call_threshold": 0.4405,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4626,
+      "strength": 0.5374,
+      "three_bet_threshold": 0.5468
+    },
+    "JTs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "K2o": {
+      "call_threshold": 0.627,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8211,
+      "strength": 0.1789,
+      "three_bet_threshold": 0.7691
+    },
+    "K2s": {
+      "call_threshold": 0.5854,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7411,
+      "strength": 0.2589,
+      "three_bet_threshold": 0.7195
+    },
+    "K3o": {
+      "call_threshold": 0.6024,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7739,
+      "strength": 0.2261,
+      "three_bet_threshold": 0.7398
+    },
+    "K3s": {
+      "call_threshold": 0.5608,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6939,
+      "strength": 0.3061,
+      "three_bet_threshold": 0.6902
+    },
+    "K4o": {
+      "call_threshold": 0.5778,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7266,
+      "strength": 0.2734,
+      "three_bet_threshold": 0.7105
+    },
+    "K4s": {
+      "call_threshold": 0.5362,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6466,
+      "strength": 0.3534,
+      "three_bet_threshold": 0.6609
+    },
+    "K5o": {
+      "call_threshold": 0.5533,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6794,
+      "strength": 0.3206,
+      "three_bet_threshold": 0.6812
+    },
+    "K5s": {
+      "call_threshold": 0.5117,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5994,
+      "strength": 0.4006,
+      "three_bet_threshold": 0.6316
+    },
+    "K6o": {
+      "call_threshold": 0.5287,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6321,
+      "strength": 0.3679,
+      "three_bet_threshold": 0.6519
+    },
+    "K6s": {
+      "call_threshold": 0.4871,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5521,
+      "strength": 0.4479,
+      "three_bet_threshold": 0.6023
+    },
+    "K7o": {
+      "call_threshold": 0.5041,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5848,
+      "strength": 0.4152,
+      "three_bet_threshold": 0.6226
+    },
+    "K7s": {
+      "call_threshold": 0.4625,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5048,
+      "strength": 0.4952,
+      "three_bet_threshold": 0.573
+    },
+    "K8o": {
+      "call_threshold": 0.4795,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5376,
+      "strength": 0.4624,
+      "three_bet_threshold": 0.5933
+    },
+    "K8s": {
+      "call_threshold": 0.4379,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4576,
+      "strength": 0.5424,
+      "three_bet_threshold": 0.5437
+    },
+    "K9o": {
+      "call_threshold": 0.455,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4903,
+      "strength": 0.5097,
+      "three_bet_threshold": 0.564
+    },
+    "K9s": {
+      "call_threshold": 0.4134,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4103,
+      "strength": 0.5897,
+      "three_bet_threshold": 0.5144
+    },
+    "KJo": {
+      "call_threshold": 0.4214,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4258,
+      "strength": 0.5742,
+      "three_bet_threshold": 0.524
+    },
+    "KJs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "KK": {
+      "call_threshold": 0.2104,
+      "class": "premium_pair",
+      "combos": 6,
+      "open_threshold": 0.02,
+      "strength": 0.98,
+      "three_bet_threshold": 0.2724
+    },
+    "KQo": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 12,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "KQs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "KTo": {
+      "call_threshold": 0.4382,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4581,
+      "strength": 0.5419,
+      "three_bet_threshold": 0.544
+    },
+    "KTs": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "Q2o": {
+      "call_threshold": 0.636,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8384,
+      "strength": 0.1616,
+      "three_bet_threshold": 0.7798
+    },
+    "Q2s": {
+      "call_threshold": 0.5944,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7584,
+      "strength": 0.2416,
+      "three_bet_threshold": 0.7302
+    },
+    "Q3o": {
+      "call_threshold": 0.6114,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7911,
+      "strength": 0.2089,
+      "three_bet_threshold": 0.7505
+    },
+    "Q3s": {
+      "call_threshold": 0.5698,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7111,
+      "strength": 0.2889,
+      "three_bet_threshold": 0.7009
+    },
+    "Q4o": {
+      "call_threshold": 0.5868,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7439,
+      "strength": 0.2561,
+      "three_bet_threshold": 0.7212
+    },
+    "Q4s": {
+      "call_threshold": 0.5452,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6639,
+      "strength": 0.3361,
+      "three_bet_threshold": 0.6716
+    },
+    "Q5o": {
+      "call_threshold": 0.5622,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6966,
+      "strength": 0.3034,
+      "three_bet_threshold": 0.6919
+    },
+    "Q5s": {
+      "call_threshold": 0.5206,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6166,
+      "strength": 0.3834,
+      "three_bet_threshold": 0.6423
+    },
+    "Q6o": {
+      "call_threshold": 0.5377,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6494,
+      "strength": 0.3506,
+      "three_bet_threshold": 0.6626
+    },
+    "Q6s": {
+      "call_threshold": 0.4961,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5694,
+      "strength": 0.4306,
+      "three_bet_threshold": 0.613
+    },
+    "Q7o": {
+      "call_threshold": 0.5131,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6021,
+      "strength": 0.3979,
+      "three_bet_threshold": 0.6333
+    },
+    "Q7s": {
+      "call_threshold": 0.4715,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5221,
+      "strength": 0.4779,
+      "three_bet_threshold": 0.5837
+    },
+    "Q8o": {
+      "call_threshold": 0.4885,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5548,
+      "strength": 0.4452,
+      "three_bet_threshold": 0.604
+    },
+    "Q8s": {
+      "call_threshold": 0.4469,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4748,
+      "strength": 0.5252,
+      "three_bet_threshold": 0.5544
+    },
+    "Q9o": {
+      "call_threshold": 0.4717,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5226,
+      "strength": 0.4774,
+      "three_bet_threshold": 0.584
+    },
+    "Q9s": {
+      "call_threshold": 0.4301,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.4426,
+      "strength": 0.5574,
+      "three_bet_threshold": 0.5344
+    },
+    "QJo": {
+      "call_threshold": 0.407,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.3981,
+      "strength": 0.6019,
+      "three_bet_threshold": 0.5068
+    },
+    "QJs": {
+      "call_threshold": 0.3352,
+      "class": "strong_broadway",
+      "combos": 4,
+      "open_threshold": 0.26,
+      "strength": 0.74,
+      "three_bet_threshold": 0.4212
+    },
+    "QQ": {
+      "call_threshold": 0.2416,
+      "class": "premium_pair",
+      "combos": 6,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    },
+    "QTo": {
+      "call_threshold": 0.455,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.4903,
+      "strength": 0.5097,
+      "three_bet_threshold": 0.564
+    },
+    "QTs": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "T2o": {
+      "call_threshold": 0.6539,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8729,
+      "strength": 0.1271,
+      "three_bet_threshold": 0.8012
+    },
+    "T2s": {
+      "call_threshold": 0.6123,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7929,
+      "strength": 0.2071,
+      "three_bet_threshold": 0.7516
+    },
+    "T3o": {
+      "call_threshold": 0.6293,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.8256,
+      "strength": 0.1744,
+      "three_bet_threshold": 0.7719
+    },
+    "T3s": {
+      "call_threshold": 0.5877,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.7456,
+      "strength": 0.2544,
+      "three_bet_threshold": 0.7223
+    },
+    "T4o": {
+      "call_threshold": 0.6048,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7784,
+      "strength": 0.2216,
+      "three_bet_threshold": 0.7426
+    },
+    "T4s": {
+      "call_threshold": 0.5632,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6984,
+      "strength": 0.3016,
+      "three_bet_threshold": 0.693
+    },
+    "T5o": {
+      "call_threshold": 0.5802,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.7311,
+      "strength": 0.2689,
+      "three_bet_threshold": 0.7133
+    },
+    "T5s": {
+      "call_threshold": 0.5386,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6511,
+      "strength": 0.3489,
+      "three_bet_threshold": 0.6637
+    },
+    "T6o": {
+      "call_threshold": 0.5556,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6839,
+      "strength": 0.3161,
+      "three_bet_threshold": 0.684
+    },
+    "T6s": {
+      "call_threshold": 0.514,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.6039,
+      "strength": 0.3961,
+      "three_bet_threshold": 0.6344
+    },
+    "T7o": {
+      "call_threshold": 0.5388,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6516,
+      "strength": 0.3484,
+      "three_bet_threshold": 0.664
+    },
+    "T7s": {
+      "call_threshold": 0.4972,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5716,
+      "strength": 0.4284,
+      "three_bet_threshold": 0.6144
+    },
+    "T8o": {
+      "call_threshold": 0.5221,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.6194,
+      "strength": 0.3806,
+      "three_bet_threshold": 0.644
+    },
+    "T8s": {
+      "call_threshold": 0.4805,
+      "class": "trash",
+      "combos": 4,
+      "open_threshold": 0.5394,
+      "strength": 0.4606,
+      "three_bet_threshold": 0.5944
+    },
+    "T9o": {
+      "call_threshold": 0.4741,
+      "class": "trash",
+      "combos": 12,
+      "open_threshold": 0.5271,
+      "strength": 0.4729,
+      "three_bet_threshold": 0.5868
+    },
+    "T9s": {
+      "call_threshold": 0.4184,
+      "class": "speculative_suited",
+      "combos": 4,
+      "open_threshold": 0.42,
+      "strength": 0.58,
+      "three_bet_threshold": 0.5204
+    },
+    "TT": {
+      "call_threshold": 0.2416,
+      "class": "premium_pair",
+      "combos": 6,
+      "open_threshold": 0.08,
+      "strength": 0.92,
+      "three_bet_threshold": 0.3096
+    }
+  },
+  "rfi_ranges": {
+    "BTN": {
+      "hands": [
+        "AA",
+        "AKs",
+        "AKo",
+        "AQs",
+        "AQo",
+        "AJs",
+        "AJo",
+        "ATs",
+        "ATo",
+        "A9s",
+        "A9o",
+        "A8s",
+        "A8o",
+        "A7s",
+        "A7o",
+        "A6s",
+        "A6o",
+        "A5s",
+        "A5o",
+        "A4s",
+        "A4o",
+        "A3s",
+        "A2s",
+        "KK",
+        "KQs",
+        "KQo",
+        "KJs",
+        "KJo",
+        "KTs",
+        "KTo",
+        "K9s",
+        "K9o",
+        "K8s",
+        "K8o",
+        "K7s",
+        "K6s",
+        "K5s",
+        "K4s",
+        "K3s",
+        "K2s",
+        "QQ",
+        "QJs",
+        "QJo",
+        "QTs",
+        "QTo",
+        "Q9s",
+        "Q9o",
+        "Q8s",
+        "Q7s",
+        "Q6s",
+        "Q5s",
+        "Q4s",
+        "Q3s",
+        "JJ",
+        "JTs",
+        "JTo",
+        "J9s",
+        "J9o",
+        "J8s",
+        "J7s",
+        "J6s",
+        "J5s",
+        "J4s",
+        "TT",
+        "T9s",
+        "T9o",
+        "T8s",
+        "T8o",
+        "T7s",
+        "T6s",
+        "99",
+        "98s",
+        "98o",
+        "97s",
+        "96s",
+        "88",
+        "87s",
+        "86s",
+        "85s",
+        "77",
+        "76s",
+        "75s",
+        "66",
+        "65s",
+        "64s",
+        "55",
+        "54s",
+        "53s",
+        "44",
+        "33"
+      ],
+      "notation": "33+,A2s+,K2s+,Q3s+,J4s+,T6s+,96s+,85s+,75s+,64s+,53s+,A4o+,K8o+,Q9o+,J9o+,T8o+,98o",
+      "percent": 43.5,
+      "source": "PokerCoaching 6-max 100bb implementable RFI range"
+    },
+    "CO": {
+      "hands": [
+        "AA",
+        "AKs",
+        "AKo",
+        "AQs",
+        "AQo",
+        "AJs",
+        "AJo",
+        "ATs",
+        "ATo",
+        "A9s",
+        "A9o",
+        "A8s",
+        "A8o",
+        "A7s",
+        "A6s",
+        "A5s",
+        "A4s",
+        "A3s",
+        "A2s",
+        "KK",
+        "KQs",
+        "KQo",
+        "KJs",
+        "KJo",
+        "KTs",
+        "KTo",
+        "K9s",
+        "K8s",
+        "K7s",
+        "K6s",
+        "K5s",
+        "K4s",
+        "K3s",
+        "QQ",
+        "QJs",
+        "QJo",
+        "QTs",
+        "QTo",
+        "Q9s",
+        "Q8s",
+        "Q7s",
+        "Q6s",
+        "JJ",
+        "JTs",
+        "JTo",
+        "J9s",
+        "J8s",
+        "TT",
+        "T9s",
+        "T8s",
+        "T7s",
+        "99",
+        "98s",
+        "97s",
+        "88",
+        "87s",
+        "77",
+        "76s",
+        "66",
+        "55",
+        "44",
+        "33"
+      ],
+      "notation": "33+,A2s+,K3s+,Q6s+,J8s+,T7s+,97s+,87s,76s,A8o+,KTo+,QTo+,JTo",
+      "percent": 27.8,
+      "source": "PokerCoaching 6-max 100bb implementable RFI range"
+    },
+    "HJ": {
+      "hands": [
+        "AA",
+        "AKs",
+        "AKo",
+        "AQs",
+        "AQo",
+        "AJs",
+        "AJo",
+        "ATs",
+        "ATo",
+        "A9s",
+        "A8s",
+        "A7s",
+        "A6s",
+        "A5s",
+        "A4s",
+        "A3s",
+        "A2s",
+        "KK",
+        "KQs",
+        "KQo",
+        "KJs",
+        "KJo",
+        "KTs",
+        "KTo",
+        "K9s",
+        "K8s",
+        "K7s",
+        "K6s",
+        "QQ",
+        "QJs",
+        "QJo",
+        "QTs",
+        "QTo",
+        "Q9s",
+        "JJ",
+        "JTs",
+        "J9s",
+        "TT",
+        "T9s",
+        "99",
+        "98s",
+        "88",
+        "87s",
+        "77",
+        "76s",
+        "66",
+        "55"
+      ],
+      "notation": "55+,A2s+,K6s+,Q9s+,J9s+,T9s,98s,87s,76s,ATo+,KTo+,QTo+",
+      "percent": 21.4,
+      "source": "PokerCoaching 6-max 100bb implementable RFI range"
+    },
+    "LJ": {
+      "hands": [
+        "AA",
+        "AKs",
+        "AKo",
+        "AQs",
+        "AQo",
+        "AJs",
+        "AJo",
+        "ATs",
+        "ATo",
+        "A9s",
+        "A8s",
+        "A7s",
+        "A6s",
+        "A5s",
+        "A4s",
+        "A3s",
+        "KK",
+        "KQs",
+        "KQo",
+        "KJs",
+        "KJo",
+        "KTs",
+        "K9s",
+        "K8s",
+        "QQ",
+        "QJs",
+        "QJo",
+        "QTs",
+        "Q9s",
+        "JJ",
+        "JTs",
+        "J9s",
+        "TT",
+        "T9s",
+        "99",
+        "88",
+        "77",
+        "66"
+      ],
+      "notation": "66+,A3s+,K8s+,Q9s+,J9s+,T9s,ATo+,KJo+,QJo",
+      "percent": 17.6,
+      "source": "PokerCoaching 6-max 100bb implementable RFI range"
+    },
+    "SB": {
+      "hands": [
+        "AA",
+        "AKs",
+        "AKo",
+        "AQs",
+        "AQo",
+        "AJs",
+        "AJo",
+        "ATs",
+        "ATo",
+        "A9s",
+        "A9o",
+        "A8s",
+        "A8o",
+        "A7s",
+        "A7o",
+        "A6s",
+        "A6o",
+        "A5s",
+        "A5o",
+        "A4s",
+        "A4o",
+        "A3s",
+        "A3o",
+        "A2s",
+        "A2o",
+        "KK",
+        "KQs",
+        "KQo",
+        "KJs",
+        "KJo",
+        "KTs",
+        "KTo",
+        "K9s",
+        "K9o",
+        "K8s",
+        "K8o",
+        "K7s",
+        "K7o",
+        "K6s",
+        "K6o",
+        "K5s",
+        "K5o",
+        "K4s",
+        "K4o",
+        "K3s",
+        "K2s",
+        "QQ",
+        "QJs",
+        "QJo",
+        "QTs",
+        "QTo",
+        "Q9s",
+        "Q9o",
+        "Q8s",
+        "Q8o",
+        "Q7s",
+        "Q7o",
+        "Q6s",
+        "Q6o",
+        "Q5s",
+        "Q5o",
+        "Q4s",
+        "Q3s",
+        "Q2s",
+        "JJ",
+        "JTs",
+        "JTo",
+        "J9s",
+        "J9o",
+        "J8s",
+        "J8o",
+        "J7s",
+        "J7o",
+        "J6s",
+        "J5s",
+        "J4s",
+        "J3s",
+        "J2s",
+        "TT",
+        "T9s",
+        "T9o",
+        "T8s",
+        "T8o",
+        "T7s",
+        "T7o",
+        "T6s",
+        "T5s",
+        "T4s",
+        "T3s",
+        "99",
+        "98s",
+        "98o",
+        "97s",
+        "97o",
+        "96s",
+        "96o",
+        "95s",
+        "94s",
+        "88",
+        "87s",
+        "87o",
+        "86s",
+        "86o",
+        "85s",
+        "84s",
+        "77",
+        "76s",
+        "76o",
+        "75s",
+        "74s",
+        "66",
+        "65s",
+        "64s",
+        "63s",
+        "55",
+        "54s",
+        "53s",
+        "44",
+        "43s",
+        "33",
+        "22"
+      ],
+      "notation": "22+,A2s+,K2s+,Q2s+,J2s+,T3s+,94s+,84s+,74s+,63s+,53s+,43s,A2o+,K4o+,Q5o+,J7o+,T7o+,96o+,86o+,76o",
+      "percent": 62.3,
+      "source": "PokerCoaching 6-max 100bb implementable RFI range"
+    }
+  },
+  "spr_buckets": {
+    "high": {
+      "bluff_fraction": 0.38,
+      "max": 99.0,
+      "value_fraction": 0.55
+    },
+    "low": {
+      "bluff_fraction": 0.35,
+      "max": 2.0,
+      "value_fraction": 0.95
+    },
+    "medium": {
+      "bluff_fraction": 0.45,
+      "max": 6.0,
+      "value_fraction": 0.72
+    }
+  }
+}

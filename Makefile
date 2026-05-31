@@ -92,8 +92,17 @@ build-cpp:
 	@echo ">> Building deep_cfr_gen extension"
 	cmake --build deep_cfr_cpp/build --config Release -j
 
+build-cpp-cuda:
+	@echo ">> Configuring deep_cfr_cpp with CUDA support (ENABLE_CUDA=ON)"
+	cmake -S deep_cfr_cpp -B deep_cfr_cpp/build_cuda \
+	      -DCMAKE_BUILD_TYPE=Release \
+	      -DENABLE_CUDA=ON \
+	      -DPython3_EXECUTABLE=$(VPY)
+	@echo ">> Building deep_cfr_cuda extension"
+	cmake --build deep_cfr_cpp/build_cuda --config Release -j
+
 clean-cpp:
-	rm -rf deep_cfr_cpp/build
+	rm -rf deep_cfr_cpp/build deep_cfr_cpp/build_cuda
 
 # ── Training entry points (require: install-train + build-cpp) ───────────────
 # Uses $(VENV) Python if present (VM workflow), else system python3 (local dev).

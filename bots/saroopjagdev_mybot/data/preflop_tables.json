@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "Conservative M1 preflop overlay for a few marginal spots only.",
+  "rules": [
+    {
+      "table_size": "full",
+      "position_bucket": ["middle", "late", "blind"],
+      "stack_bucket": ["medium", "deep"],
+      "facing_action": "facing_open",
+      "hand_class": "suited_ace",
+      "action": "suppress_bluff_3bet",
+      "call_pot_odds_max": 0.22
+    },
+    {
+      "table_size": "full",
+      "position_bucket": ["middle", "late"],
+      "stack_bucket": ["medium", "deep"],
+      "facing_action": "facing_open",
+      "hand_class": "offsuit_broadway",
+      "action": "prefer_fold"
+    },
+    {
+      "table_size": "full",
+      "position_bucket": "blind",
+      "stack_bucket": ["medium", "deep"],
+      "facing_action": "facing_open",
+      "hand_class": "offsuit_broadway",
+      "action": "prefer_call",
+      "call_pot_odds_max": 0.18
+    },
+    {
+      "table_size": "short",
+      "position_bucket": "late",
+      "stack_bucket": ["medium", "deep"],
+      "facing_action": "unopened",
+      "hand_class": "small_pair",
+      "action": "prefer_raise"
+    },
+    {
+      "table_size": "full",
+      "position_bucket": "early",
+      "stack_bucket": ["medium", "deep"],
+      "facing_action": "facing_open",
+      "hand_class": "small_pair",
+      "action": "prefer_fold"
+    }
+  ]
+}

@@ -71,6 +71,43 @@ if(MSVC)
   target_compile_options(deep_cfr_gen PRIVATE /O2 /arch:AVX2 /fp:fast)
 endif()
 
+# ── CUDA extension (optional) ─────────────────────────────────────────────────
+# Build with:  cmake -DENABLE_CUDA=ON ...  (or: make build-cpp-cuda)
+# Produces:    deep_cfr_cuda.pyd / .so   — exposes forward_batch() for parity testing
+#              and (Phase 2) the full MCCFR traversal engine.
+option(ENABLE_CUDA "Build CUDA-accelerated deep_cfr_cuda extension (requires CUDA toolkit)" OFF)
+
+if(ENABLE_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  if(NOT DEFINED CMAKE_CUDA_STANDARD)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  endif()
+
+  pybind11_add_module(deep_cfr_cuda
+    src/network_cuda.cu    # compiled by nvcc
+    src/binding_cuda.cpp   # compiled by host CXX; calls cuda_mlp_* via opaque ptr
+  )
+  target_include_directories(deep_cfr_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(deep_cfr_cuda PRIVATE CUDA::cublas)
+
+  # Allow constexpr / extended host-device lambdas when nvcc touches pybind11 headers.
+  target_compile_options(deep_cfr_cuda PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+  )
+  if(MSVC)
+    target_compile_options(deep_cfr_cuda PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler /O2,/W3>
+    )
+  else()
+    target_compile_options(deep_cfr_cuda PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -O3,-fno-semantic-interposition>
+    )
+  endif()
+  message(STATUS "CUDA extension enabled — target: deep_cfr_cuda")
+endif()
+
 # ── Link-Time Optimisation ────────────────────────────────────────────────────
 # Enables cross-TU inlining: forward_single (network.cpp), build_feature_vector
 # (features.cpp), and the Eigen GEMV can all be seen in one pass and inlined
