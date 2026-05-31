@@ -58,16 +58,28 @@ HIDDEN_DIM = 512
 N_LAYERS   = 4     # hidden layers
 
 # ── Memory buffers ─────────────────────────────────────────────────────────
-REGRET_BUF_CAP   = 4_000_000
-STRATEGY_BUF_CAP = 4_000_000
+# 8M cap: saturates around iter 160 at 50k games/iter (8M / ~50 samples/game).
+# Keeps the most recent, highest-weight samples in the reservoir.
+REGRET_BUF_CAP   = 8_000_000
+STRATEGY_BUF_CAP = 8_000_000
 
 # ── Training loop ─────────────────────────────────────────────────────────
-K_ITERATIONS      = 100
-GAMES_PER_ITER    = 10_000
+# Target: 300 iters × 50k games = 15M traversals.  Estimated wall time on a
+# 16-core CPU + GPU VM: ~40–50 h.  Use --quick (5 iters × 200 games) to
+# smoke-test the build before committing to a full run.
+K_ITERATIONS      = 300
+GAMES_PER_ITER    = 50_000
 BATCH_SIZE        = 4_096
 LEARNING_RATE     = 1e-3
-REGRET_TRAIN_STEPS    = 5_000  # SGD steps per iteration on regret net
-STRATEGY_TRAIN_STEPS  = 15_000  # SGD steps on strategy net at the end
+
+# Regret net: retrained from scratch each iteration; ~5 passes over the full
+# buffer is enough.  Formula: REGRET_BUF_CAP / BATCH_SIZE * 5 ≈ 9 766.
+REGRET_TRAIN_STEPS    = 10_000
+
+# Strategy net: trained once at the end and ships in production.  Needs more
+# passes than the regret net.  Formula: STRATEGY_BUF_CAP / BATCH_SIZE * 25
+# ≈ 48 828.  The final LR is decayed by the cosine scheduler in train.py.
+STRATEGY_TRAIN_STEPS  = 50_000
 
 # ── Export ─────────────────────────────────────────────────────────────────
 MODEL_FILENAME = "gto_strategy"

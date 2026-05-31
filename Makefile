@@ -1,7 +1,7 @@
 .PHONY: install install-train install-train-gpu install-system install-vm \
         build-cpp clean-cpp train train-quick \
         train-preflop train-preflop-quick \
-        demo test validate clean release
+        demo test validate clean release release-zip
 
 # ── VM Python config ────────────────────────────────────────────────────────
 # install-vm pins to Python 3.10 because eval7 0.1.7 ships pre-generated C
@@ -127,4 +127,7 @@ clean:
 
 # ── Release: package bot.py + data/ into a timestamped snapshot ─────────────
 release:
-	python3 -c "import shutil,os,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; os.makedirs(d+'/data',exist_ok=True); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); shutil.copy('bots/vlad/data/gto_strategy.npz',d+'/data/gto_strategy.npz'); print('Release ready: '+d)"
+	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; shutil.copytree('bots/vlad/data',d+'/data'); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); print('Release ready: '+d)"
+
+release-zip:
+	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; shutil.copytree('bots/vlad/data',d+'/data'); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); shutil.make_archive(d,'zip',root_dir=d); shutil.rmtree(d); print('Release ready: '+d+'.zip')"

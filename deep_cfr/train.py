@@ -147,9 +147,15 @@ def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
     """Iteration-weighted MSE on (state, strategy_vector, weight) triples.
 
     Same double-buffered prefetch pattern as _train_regret.
+    Cosine LR decay (1e-3 → 1e-5) over the full step budget: the strategy net
+    trains once and ships, so it benefits from a finer final pass that a
+    constant LR would oscillate through.
     """
     net.train()
-    opt     = optim.Adam(net.parameters(), lr=LEARNING_RATE)
+    opt      = optim.Adam(net.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=n_steps, eta_min=1e-5
+    )
     loss_fn = nn.MSELoss(reduction="none")
     last_loss = 0.0
 
@@ -187,9 +193,11 @@ def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
             opt.zero_grad()
             loss.backward()
             opt.step()
+            scheduler.step()
             last_loss = loss.item()
             if step % 200 == 0:
-                print(f"    strategy step {step:4d}  loss={loss.item():.4f}")
+                lr = scheduler.get_last_lr()[0]
+                print(f"    strategy step {step:4d}  loss={loss.item():.4f}  lr={lr:.2e}")
             cur = nxt
 
     return last_loss

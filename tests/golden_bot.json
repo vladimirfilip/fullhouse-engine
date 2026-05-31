@@ -1,20 +1,23 @@
 {
   "preflop_utg_vs_bb": {
-    "action": "fold"
+    "action": "raise",
+    "amount": 300
   },
   "preflop_bb_vs_3bet": {
     "action": "all_in"
   },
   "preflop_4handed": {
-    "action": "fold"
+    "action": "raise",
+    "amount": 300
   },
   "flop_facing_bet": {
     "action": "fold"
   },
   "turn_check_to": {
-    "action": "all_in"
+    "action": "raise",
+    "amount": 360
   },
   "river_facing_overbet": {
-    "action": "all_in"
+    "action": "fold"
   }
 }
