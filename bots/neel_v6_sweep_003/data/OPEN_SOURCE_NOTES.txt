@@ -1,0 +1,15 @@
+FullHouseOpenCFR data sources
+
+- postflop_solver_digest.json was generated offline from b-inary/postflop-solver
+  (https://github.com/b-inary/postflop-solver), an AGPL-3.0-or-later Rust
+  postflop solver implementing Discounted CFR.
+- cfr_action_profile.json is a compact adapter profile for the bot's postflop
+  decisions. It maps the solver digest into Fullhouse's action abstraction
+  (check/call/fold/raise/all_in) and carries texture-specific sizing/continue
+  knobs inspired by WASM Postflop, the open-source browser GTO solver at
+  https://github.com/b-inary/wasm-postflop.
+- The submitted bot does not include postflop-solver source or binaries. It
+  includes only small aggregated strategy data produced from solved
+  representative flop subgames, plus an adapter profile.
+- preflop_blueprint.json is a compact generated action-abstraction table for
+  the Fullhouse engine.

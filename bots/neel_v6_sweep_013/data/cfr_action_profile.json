@@ -1,0 +1,168 @@
+{
+  "version": "fullhouse_open_cfr_profile_v2",
+  "source": {
+    "primary": "https://github.com/b-inary/wasm-postflop",
+    "solver_engine": "https://github.com/b-inary/postflop-solver",
+    "algorithm": "Discounted CFR",
+    "license": "AGPL-3.0-or-later",
+    "runtime_note": "The bot ships only compact aggregate strategy data and adapter knobs. It does not run the Rust/WASM solver during a hand."
+  },
+  "defaults": {
+    "probe": {
+      "solver_weight": 0.7755,
+      "baseline": 0.03,
+      "fallback_frequency": 0.18,
+      "min_bucket_n": 4,
+      "air_equity_floor": 0.3987,
+      "air_penalty": 0.18,
+      "draw_bonus": 0.09,
+      "value_bonus": 0.13,
+      "thin_pair_bonus": 0.04,
+      "heads_up_bonus": 0.03,
+      "two_way_penalty": 0.08
+    },
+    "sizes": {
+      "small": 0.34,
+      "medium": 0.54,
+      "polar": 0.72,
+      "jam_spr": 0.82
+    },
+    "vs_bet": {
+      "continue_equity": 0.1736,
+      "price_weight": 0.92,
+      "made_discount": 0.048,
+      "draw_discount": 0.028,
+      "river_tax": 0.0258,
+      "multiway_tax": 0.048,
+      "raise_value_made": 5,
+      "raise_value_equity": 0.78,
+      "raise_draw_min": 4,
+      "raise_freq": 0.12,
+      "raise_max_price": 0.34,
+      "draw_peel_price": 0.2,
+      "pair_peel_price": 0.15,
+      "fold_price": 0.3426
+    }
+  },
+  "textures": {
+    "dry_high": {
+      "probe": {
+        "baseline": 0.01,
+        "fallback_frequency": 0.24,
+        "air_equity_floor": 0.38,
+        "two_way_penalty": 0.05
+      },
+      "sizes": {
+        "small": 0.33,
+        "medium": 0.5,
+        "polar": 0.67
+      },
+      "vs_bet": {
+        "continue_equity": 0.2,
+        "draw_discount": 0.018,
+        "raise_freq": 0.09,
+        "fold_price": 0.33
+      }
+    },
+    "rainbow_mid": {
+      "probe": {
+        "fallback_frequency": 0.3,
+        "air_equity_floor": 0.35,
+        "heads_up_bonus": 0.04
+      },
+      "sizes": {
+        "small": 0.34,
+        "medium": 0.53,
+        "polar": 0.7
+      },
+      "vs_bet": {
+        "continue_equity": 0.18,
+        "raise_freq": 0.11
+      }
+    },
+    "paired_mid": {
+      "probe": {
+        "baseline": 0.02,
+        "fallback_frequency": 0.22,
+        "air_equity_floor": 0.34,
+        "value_bonus": 0.1
+      },
+      "sizes": {
+        "small": 0.3,
+        "medium": 0.45,
+        "polar": 0.62
+      },
+      "vs_bet": {
+        "continue_equity": 0.19,
+        "made_discount": 0.055,
+        "raise_value_made": 4,
+        "raise_freq": 0.1
+      }
+    },
+    "monotone_high": {
+      "probe": {
+        "baseline": 0.0,
+        "fallback_frequency": 0.16,
+        "air_equity_floor": 0.41,
+        "draw_bonus": 0.06,
+        "two_way_penalty": 0.1
+      },
+      "sizes": {
+        "small": 0.32,
+        "medium": 0.5,
+        "polar": 0.68
+      },
+      "vs_bet": {
+        "continue_equity": 0.22,
+        "draw_discount": 0.02,
+        "raise_draw_min": 5,
+        "raise_freq": 0.08,
+        "fold_price": 0.32
+      }
+    },
+    "low_connected": {
+      "probe": {
+        "baseline": 0.04,
+        "fallback_frequency": 0.32,
+        "air_equity_floor": 0.39,
+        "draw_bonus": 0.16,
+        "value_bonus": 0.18
+      },
+      "sizes": {
+        "small": 0.42,
+        "medium": 0.62,
+        "polar": 0.86,
+        "jam_spr": 0.76
+      },
+      "vs_bet": {
+        "continue_equity": 0.17,
+        "draw_discount": 0.04,
+        "draw_peel_price": 0.24,
+        "raise_draw_min": 3,
+        "raise_freq": 0.16
+      }
+    },
+    "wet_broadway": {
+      "probe": {
+        "baseline": 0.03,
+        "fallback_frequency": 0.34,
+        "air_equity_floor": 0.4,
+        "draw_bonus": 0.14,
+        "value_bonus": 0.18
+      },
+      "sizes": {
+        "small": 0.4,
+        "medium": 0.6,
+        "polar": 0.82,
+        "jam_spr": 0.78
+      },
+      "vs_bet": {
+        "continue_equity": 0.18,
+        "draw_discount": 0.036,
+        "draw_peel_price": 0.23,
+        "raise_draw_min": 3,
+        "raise_freq": 0.15
+      }
+    }
+  }
+}

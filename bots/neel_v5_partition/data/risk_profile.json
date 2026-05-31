@@ -1,0 +1,70 @@
+{
+  "version": "robust-hybrid-risk-v1",
+  "source": "Heuristic offline risk gate for qualifier robustness; generated without friend-bot-specific tuning.",
+  "defaults": {
+    "large_risk_frac": 0.22,
+    "huge_risk_frac": 0.46,
+    "lead_stack": 13000,
+    "lead_extra_margin": 0.035,
+    "unknown_extra_margin": 0.012,
+    "multiway_margin": 0.035,
+    "street_margin": {
+      "flop": 0.015,
+      "turn": 0.032,
+      "river": 0.055
+    },
+    "made_relief": {
+      "0": 0.0,
+      "1": 0.018,
+      "2": 0.045,
+      "3": 0.075,
+      "4": 0.12,
+      "5": 0.16,
+      "6": 0.24,
+      "7": 0.3,
+      "8": 0.35
+    },
+    "draw_relief": {
+      "0": 0.0,
+      "1": 0.005,
+      "2": 0.02,
+      "3": 0.045,
+      "4": 0.065,
+      "5": 0.08
+    }
+  },
+  "bucket_rules": [
+    {
+      "street": "river",
+      "max_made": 1,
+      "min_risk_frac": 0.22,
+      "min_equity": 0.58
+    },
+    {
+      "street": "river",
+      "min_made": 2,
+      "max_made": 2,
+      "min_risk_frac": 0.35,
+      "min_equity": 0.52
+    },
+    {
+      "street": "turn",
+      "max_made": 1,
+      "min_risk_frac": 0.35,
+      "min_equity": 0.48
+    },
+    {
+      "street": "flop",
+      "max_made": 1,
+      "min_risk_frac": 0.42,
+      "min_equity": 0.45
+    },
+    {
+      "street": "*",
+      "max_made": 2,
+      "min_risk_frac": 0.52,
+      "min_opponents": 3,
+      "min_equity": 0.57
+    }
+  ]
+}

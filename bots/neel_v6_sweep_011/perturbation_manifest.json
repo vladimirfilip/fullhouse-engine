@@ -1,0 +1,24 @@
+{
+  "name": "neel_v6_sweep_011",
+  "base": "bots/neel_v5_partition",
+  "risk_deltas": {
+    "large_risk_frac": 0.0436,
+    "huge_risk_frac": 0.0365,
+    "multiway_margin": -0.0149,
+    "unknown_extra_margin": 0.0041,
+    "lead_extra_margin": -0.0029,
+    "street_margin.flop": -0.0119,
+    "street_margin.turn": 0.0054,
+    "street_margin.river": -0.0008,
+    "made_relief.2": -0.0112,
+    "made_relief.4": 0.0078,
+    "made_relief.6": 0.0073
+  },
+  "cfr_deltas": {
+    "probe.solver_weight": -0.0462,
+    "probe.air_equity_floor": 0.012,
+    "vs_bet.continue_equity": 0.0254,
+    "vs_bet.river_tax": -0.0086,
+    "vs_bet.fold_price": 0.0152
+  }
+}
