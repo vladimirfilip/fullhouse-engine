@@ -105,7 +105,7 @@ train-quick:
 
 # ── Preflop tabular CFR (pure Python + eval7, no C++ required) ───────────────
 train-preflop:
-	$(VPY) -m preflop_cfr.train
+	$(VPY) -m preflop_cfr.train >> train.log 2>&1
 
 train-preflop-quick:
 	$(VPY) -m preflop_cfr.train --quick
