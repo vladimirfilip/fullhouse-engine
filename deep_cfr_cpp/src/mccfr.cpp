@@ -210,7 +210,7 @@ float mccfr(const GameState& state,
         StrategySample ss;
         ss.state  = fvec;
         std::copy(strategy, strategy + N_ACTIONS, ss.strategy);
-        ss.weight = (float)iteration_t;
+        ss.weight = std::pow((float)iteration_t, DCFR_ALPHA);  // DCFR discount
         strategy_buf.push_back(ss);
 
         // strategy[] is already normalised over legal actions (sums to 1.0).
@@ -241,7 +241,7 @@ float mccfr(const GameState& state,
     // Instantaneous regret
     RegretSample rs;
     rs.state  = fvec;
-    rs.weight = (float)iteration_t;
+    rs.weight = std::pow((float)iteration_t, DCFR_ALPHA);  // DCFR discount
     std::fill(rs.regrets, rs.regrets + N_ACTIONS, 0.0f);
     for (int a : legal) rs.regrets[a] = action_evs[a] - node_ev;
     regret_buf.push_back(rs);

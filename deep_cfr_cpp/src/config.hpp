@@ -45,6 +45,15 @@ constexpr int   STRATEGY_TRAIN_STEPS = 15'000;  // ~15 passes; runs once, is the
 // Network
 constexpr float LEAKY_ALPHA = 0.01f;
 
+// DCFR-style sample discounting.  Deep CFR weights each (state, target) sample by
+// the iteration t at which it was produced; the weighted-mean loss then lets
+// later, better-trained iterations dominate.  Raising the exponent from 1.0
+// (plain linear CFR) to DCFR_ALPHA down-weights the early, random-net iterations
+// more aggressively — the practical benefit DCFR has over linear CFR — by using
+// weight = t^DCFR_ALPHA instead of t.  α=1.5 is the canonical DCFR value and
+// keeps weights numerically tame (t≤300 → t^1.5 ≤ ~5 200, safe in float32).
+constexpr float DCFR_ALPHA = 1.5f;
+
 // Adam defaults matching PyTorch
 constexpr float ADAM_BETA1 = 0.9f;
 constexpr float ADAM_BETA2 = 0.999f;
@@ -52,10 +61,18 @@ constexpr float ADAM_EPS   = 1e-8f;
 
 // MCCFR
 constexpr int MAX_DEPTH             = 200;
-// Production engine (engine/game.py) has no raise cap. Setting this high
-// matches production and prevents the training artifact where the network
-// learns that ALL_IN is the only aggressive option at the cap boundary.
-constexpr int MAX_RAISES_PER_STREET = 8;
+// Raise cap per street (training tree only — production engine has no cap).
+// TRADE-OFF: a lower cap shrinks the traverser subtree (each node costs a full
+// feature build + MLP forward), so data-gen throughput and convergence speed
+// improve markedly — the dominant lever for a fixed wall-clock budget. The cost
+// is a known boundary artifact: at exactly n_raises==cap the only aggressive
+// action left is ALL_IN, so the net learns inflated jam frequency in deep
+// re-raise pots. 4 still covers open/3-bet/4-bet/5-bet — 6+ bet wars are
+// vanishingly rare — and bot.py's SPR-gated ALL_IN dampener compensates for the
+// residual artifact. MUST equal _MAX_RAISES_PER_STREET in bots/vlad/bot.py and
+// MAX_RAISES_PER_STREET in deep_cfr/config.py (feature[142] normaliser); a
+// mismatch silently corrupts inference. Changing this requires a full retrain.
+constexpr int MAX_RAISES_PER_STREET = 4;
 
 // Export
 constexpr const char* MODEL_FILENAME = "gto_strategy";

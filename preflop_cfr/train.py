@@ -62,14 +62,39 @@ def _merge(target: dict[int, np.ndarray], source: dict[int, np.ndarray]):
             cur += v
 
 
-# ── Single-process chunk (authoritative, exact CFR) ───────────────────────────
+def _merge_scalar(target: dict[int, float], source: dict[int, float]):
+    """Add scalar source values (visit counts) into target in place."""
+    for k, v in source.items():
+        target[k] = target.get(k, 0.0) + v
 
-def _run_chunk(n_iters: int, regret_sum: dict, strategy_sum: dict):
-    """Run n_iters traversals directly on the shared tables (no reset)."""
+
+def _floor_regrets(regret_sum: dict[int, np.ndarray]):
+    """Re-apply the RM+ non-negativity floor to the merged regret table.
+
+    Single-process CFR+ keeps regrets ≥0 inline (see cfr._traverse), but the
+    parallel delta-merge sums per-worker deltas of independently-floored regrets,
+    which can dip a cell below 0.  Clamp here so the shared table preserves the
+    RM+ invariant before the next round warm-starts from it.
+    """
+    for v in regret_sum.values():
+        np.maximum(v, 0.0, out=v)
+
+
+# ── Single-process chunk (authoritative, exact CFR+) ──────────────────────────
+
+def _run_chunk(n_iters: int, regret_sum: dict, strategy_sum: dict,
+               visit_sum: dict, start_t: int):
+    """Run n_iters CFR+ traversals directly on the shared tables (no reset).
+
+    `start_t` is the global iteration index of the first traversal in this chunk;
+    the linear-CFR average-strategy weight is (start_t + i + 1) so it increases
+    monotonically across the whole run, not just within a chunk.
+    """
     randrange = random.randrange
     for i in range(n_iters):
-        run_iteration(i % N_PLAYERS, regret_sum, strategy_sum,
-                      dealer_seat=randrange(N_PLAYERS))
+        t = start_t + i
+        run_iteration(t % N_PLAYERS, regret_sum, strategy_sum, visit_sum,
+                      float(t + 1), dealer_seat=randrange(N_PLAYERS))
 
 
 # ── Parallel worker (warm-start + delta) ──────────────────────────────────────
@@ -91,16 +116,17 @@ def _worker_delta(args: tuple) -> tuple[dict, dict]:
     per-worker RAM and the pickle traffic.  Regrets are turned into a delta in
     place to avoid holding a third full table.
     """
-    n_iters, seed, base_r = args
+    n_iters, seed, base_r, base_t = args
     random.seed(seed)
     np.random.seed(seed & 0xFFFFFFFF)
 
-    # Warm-started regret copy (evolves from the merged state); strategy starts
-    # empty so its from-empty total IS the delta.
+    # Warm-started regret copy (evolves from the merged state); strategy and
+    # visit tables start empty so their from-empty totals ARE the deltas.
     local_r = {k: v.copy() for k, v in base_r.items()}
     local_s: dict[int, np.ndarray] = {}
+    local_v: dict[int, float]      = {}
 
-    _run_chunk(n_iters, local_r, local_s)
+    _run_chunk(n_iters, local_r, local_s, local_v, base_t)
 
     # Convert regrets to a delta in place: reuse local_r as the output so we
     # never hold base + working + delta simultaneously.
@@ -113,7 +139,7 @@ def _worker_delta(args: tuple) -> tuple[dict, dict]:
             local_r[k] = d
         else:
             del local_r[k]
-    return local_r, local_s
+    return local_r, local_s, local_v
 
 
 def _table_nbytes(table: dict[int, np.ndarray]) -> int:
@@ -161,10 +187,11 @@ def train(
 ):
     regret_sum:   dict[int, np.ndarray] = {}
     strategy_sum: dict[int, np.ndarray] = {}
+    visit_sum:    dict[int, float]      = {}
     iter_done = 0
 
     if resume and os.path.exists(config.CHECKPOINT_PATH):
-        regret_sum, strategy_sum, iter_done = load_checkpoint()
+        regret_sum, strategy_sum, visit_sum, iter_done = load_checkpoint()
         if verbose:
             print(f"[preflop_cfr] Resumed from checkpoint at iter {iter_done}",
                   flush=True)
@@ -193,7 +220,7 @@ def train(
             n = min(round_iters, total_iters - iter_done)
 
             if pool is None:
-                _run_chunk(n, regret_sum, strategy_sum)
+                _run_chunk(n, regret_sum, strategy_sum, visit_sum, iter_done)
             else:
                 # Cap concurrent workers to the live table size so peak RAM
                 # stays under budget — the tables grow over the run, so this
@@ -204,11 +231,17 @@ def train(
                           f"  -> capping workers {n_workers}->{safe} "
                           f"(budget {mem_budget_gb:g}GB)", flush=True)
                 counts = [c for c in _split(n, safe) if c > 0]
-                tasks  = [(c, random.randrange(2**31), regret_sum)
+                # Each worker warm-starts its linear-CFR weight from the global
+                # iter_done so weights stay monotonic across the whole run.
+                tasks  = [(c, random.randrange(2**31), regret_sum, iter_done)
                           for c in counts]
-                for dr, ds in pool.map(_worker_delta, tasks):
+                for dr, ds, dv in pool.map(_worker_delta, tasks):
                     _merge(regret_sum,   dr)
                     _merge(strategy_sum, ds)
+                    _merge_scalar(visit_sum, dv)
+                # Restore the RM+ floor after summing independently-floored
+                # per-worker regret deltas (see _floor_regrets).
+                _floor_regrets(regret_sum)
                 del tasks
 
             iter_done += n
@@ -220,12 +253,12 @@ def train(
                       f"{rate:.0f} iter/s  elapsed={elapsed:.1f}s", flush=True)
 
             if iter_done >= next_ckpt or iter_done >= total_iters:
-                save_checkpoint(regret_sum, strategy_sum, iter_done)
+                save_checkpoint(regret_sum, strategy_sum, visit_sum, iter_done)
                 next_ckpt += checkpoint_every
                 if verbose:
                     print(f"[preflop_cfr] Checkpoint saved at iter {iter_done}.",
                           flush=True)
-                    _visit_histogram(strategy_sum)
+                    _visit_histogram(visit_sum)
                     cur_premium = _premium_snapshot(strategy_sum)
                     _print_premium_drift(prev_premium, cur_premium)
                     prev_premium = cur_premium
@@ -234,7 +267,7 @@ def train(
             pool.close()
             pool.join()
 
-    n_exported = export_strategy(strategy_sum)
+    n_exported = export_strategy(strategy_sum, visit_sum)
     if verbose:
         print(f"[preflop_cfr] Exported {n_exported:,} info sets -> "
               f"{config.EXPORT_PATH}", flush=True)
@@ -245,11 +278,11 @@ def train(
 
 # ── Convergence diagnostics ─────────────────────────────────────────────────
 
-# Per-info-set "visits" = sum of the accumulated average-strategy mass.  Each
-# opponent-node visit adds a strategy vector that sums to 1 over legal actions,
-# so this total tracks the visit count and is exactly the quantity export.py
-# thresholds with PRUNE_MIN_VISITS — keeping the diagnostic and the prune metric
-# consistent.
+# Per-info-set visits come from the dedicated visit_sum table (one +1 per
+# opponent-node visit), which is exactly the quantity export.py thresholds with
+# PRUNE_MIN_VISITS — keeping the diagnostic and the prune metric consistent.
+# (The average-strategy table is now iteration-weighted, so it can no longer
+# double as the visit proxy.)
 _VISIT_BINS = [0, 1, 10, 100, 1_000, 10_000]
 
 # Premium UTG-open hands to watch for strategy drift (the ones the old
@@ -257,14 +290,19 @@ _VISIT_BINS = [0, 1, 10, 100, 1_000, 10_000]
 _PREMIUM_HANDS = ("AA", "KK", "QQ", "JJ", "AKs", "AKo")
 
 
-def _visit_histogram(strategy_sum: dict[int, np.ndarray]) -> None:
-    """Print a visits/info-set histogram + summary against TARGET_VISITS_PER_SET."""
-    if not strategy_sum:
+def _visit_histogram(visit_sum: dict[int, float]) -> None:
+    """Print a visits/info-set histogram + summary against TARGET_VISITS_PER_SET.
+
+    Reads the dedicated visit-count table (true per-info-set visit counts).  The
+    average-strategy table can no longer serve as the visit proxy now that it is
+    iteration-weighted (linear CFR) — its row sums scale with t, not visits.
+    """
+    if not visit_sum:
         print("[preflop_cfr] no info sets yet.", flush=True)
         return
 
-    counts = np.fromiter((v.sum() for v in strategy_sum.values()),
-                         dtype=np.float64, count=len(strategy_sum))
+    counts = np.fromiter(visit_sum.values(),
+                         dtype=np.float64, count=len(visit_sum))
     target = config.TARGET_VISITS_PER_SET
     edges  = _VISIT_BINS + [float("inf")]
     print(f"[preflop_cfr] visits/info-set over {len(counts):,} sets "

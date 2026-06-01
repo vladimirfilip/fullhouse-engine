@@ -37,8 +37,13 @@ from .config import (
     INPUT_DIM, N_ACTIONS,
 )
 
-STRATEGY_CKPT_EVERY  = 5     # train+export strategy net every N iterations
-STRATEGY_CKPT_STEPS  = 2_000 # quick mid-run training steps (vs 15k final)
+# Mid-run strategy snapshots exist only so an interrupted run still leaves a
+# usable model; they don't feed back into training. At 300 iters the old
+# every-5-iters × 2 000-step cadence spent a large slice of wall-clock retraining
+# a throwaway net. Snapshot less often and for fewer steps (the bigger batch also
+# covers the buffer faster) — the budget goes to data-gen and the final net.
+STRATEGY_CKPT_EVERY  = 25    # train+export strategy snapshot every N iterations
+STRATEGY_CKPT_STEPS  = 500   # quick mid-run training steps (vs the final pass)
 from .networks import make_regret_net, make_strategy_net
 from .export import export_net
 

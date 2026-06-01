@@ -53,7 +53,10 @@ BIG_BLIND     = 100
 #   [163]     n_active / N_PLAYERS
 #   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
 INPUT_DIM  = 308
-MAX_RAISES_PER_STREET = 8    # mirrors config.hpp; production has no cap
+# Training-tree raise cap AND the feature[142] normaliser. MUST match
+# MAX_RAISES_PER_STREET in deep_cfr_cpp/src/config.hpp and
+# _MAX_RAISES_PER_STREET in bots/vlad/bot.py (see config.hpp for the trade-off).
+MAX_RAISES_PER_STREET = 4
 HIDDEN_DIM = 512
 N_LAYERS   = 4     # hidden layers
 
@@ -69,17 +72,24 @@ STRATEGY_BUF_CAP = 8_000_000
 # smoke-test the build before committing to a full run.
 K_ITERATIONS      = 300
 GAMES_PER_ITER    = 50_000
-BATCH_SIZE        = 4_096
-LEARNING_RATE     = 1e-3
+# Bigger batch better utilises the GPU on this tiny 4×512 MLP: at 4 096 the
+# per-step Python/transfer overhead dominated and GPU occupancy was low. 16 384
+# (4×) cuts step count for the same buffer coverage and raises occupancy. LR is
+# scaled by sqrt(4)=2× (the conservative Adam rule) to keep the update size
+# stable; the cosine scheduler in train.py decays from here.
+BATCH_SIZE        = 16_384
+LEARNING_RATE     = 2e-3
 
+# Step counts hold the epoch count fixed under the 4× larger batch (else a bigger
+# batch would silently quarter the passes over the buffer).
 # Regret net: retrained from scratch each iteration; ~5 passes over the full
-# buffer is enough.  Formula: REGRET_BUF_CAP / BATCH_SIZE * 5 ≈ 9 766.
-REGRET_TRAIN_STEPS    = 10_000
+# buffer.  Formula: REGRET_BUF_CAP / BATCH_SIZE * 5 ≈ 2 441.
+REGRET_TRAIN_STEPS    = 2_500
 
 # Strategy net: trained once at the end and ships in production.  Needs more
 # passes than the regret net.  Formula: STRATEGY_BUF_CAP / BATCH_SIZE * 25
-# ≈ 48 828.  The final LR is decayed by the cosine scheduler in train.py.
-STRATEGY_TRAIN_STEPS  = 50_000
+# ≈ 12 207.  The final LR is decayed by the cosine scheduler in train.py.
+STRATEGY_TRAIN_STEPS  = 12_500
 
 # ── Export ─────────────────────────────────────────────────────────────────
 MODEL_FILENAME = "gto_strategy"

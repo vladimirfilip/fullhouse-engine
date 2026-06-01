@@ -304,14 +304,16 @@ class TestCFRSmoke:
 
         regret_sum:   dict = {}
         strategy_sum: dict = {}
+        visit_sum:    dict = {}
 
         random.seed(42)
         np.random.seed(42)
         for i in range(20):
-            run_iteration(i % 6, regret_sum, strategy_sum)
+            run_iteration(i % 6, regret_sum, strategy_sum, visit_sum, float(i + 1))
 
         assert len(regret_sum) > 0,   "regret_sum should be non-empty after traversals"
         assert len(strategy_sum) > 0, "strategy_sum should be non-empty after traversals"
+        assert len(visit_sum) > 0,    "visit_sum should be non-empty after traversals"
 
     def test_strategy_sums_non_negative(self):
         """Strategy sums must be non-negative (they are weighted probability sums)."""
@@ -321,10 +323,28 @@ class TestCFRSmoke:
 
         regret_sum:   dict = {}
         strategy_sum: dict = {}
+        visit_sum:    dict = {}
         random.seed(7)
         np.random.seed(7)
         for i in range(10):
-            run_iteration(0, regret_sum, strategy_sum)
+            run_iteration(0, regret_sum, strategy_sum, visit_sum, float(i + 1))
 
         for k, v in strategy_sum.items():
             assert (v >= 0).all(), f"Negative strategy sum at key {k}: {v}"
+
+    def test_regret_plus_non_negative(self):
+        """RM+ keeps cumulative regrets floored at 0 in storage."""
+        from preflop_cfr.cfr import run_iteration
+        from preflop_cfr.equity import get_hu_table
+        get_hu_table()
+
+        regret_sum:   dict = {}
+        strategy_sum: dict = {}
+        visit_sum:    dict = {}
+        random.seed(11)
+        np.random.seed(11)
+        for i in range(30):
+            run_iteration(i % 6, regret_sum, strategy_sum, visit_sum, float(i + 1))
+
+        for k, v in regret_sum.items():
+            assert (v >= 0).all(), f"RM+ regret went negative at key {k}: {v}"

@@ -27,12 +27,18 @@ VERSION = "1"
 
 def export_strategy(
     strategy_sum: dict[int, np.ndarray],
+    visit_sum: dict[int, float] | None = None,
     path: str = config.EXPORT_PATH,
     min_visits: int = config.PRUNE_MIN_VISITS,
 ) -> int:
     """
     Normalise strategy_sum into average strategy, prune low-visit info sets,
     and write an .npz file.  Returns the number of info sets exported.
+
+    Pruning uses the true per-info-set visit count from `visit_sum`.  Under
+    linear-CFR weighting the strategy row sum scales with iteration t, so it can
+    no longer serve as a visit proxy.  When `visit_sum` is None (legacy callers)
+    the row sum is used as a best-effort fallback.
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -41,7 +47,10 @@ def export_strategy(
 
     for key, ssum in strategy_sum.items():
         total = ssum.sum()
-        if total < min_visits:
+        if total <= 0:
+            continue
+        visits = visit_sum.get(key, 0.0) if visit_sum is not None else total
+        if visits < min_visits:
             continue
         avg = (ssum / total).astype(np.float32)
         keys_list.append(key)
@@ -94,10 +103,11 @@ def load_strategy(path: str = config.EXPORT_PATH) -> dict[int, np.ndarray]:
 def save_checkpoint(
     regret_sum:   dict[int, np.ndarray],
     strategy_sum: dict[int, np.ndarray],
+    visit_sum:    dict[int, float],
     iteration:    int,
     path: str = config.CHECKPOINT_PATH,
 ):
-    """Save raw regret/strategy sums for resuming training."""
+    """Save raw regret/strategy/visit sums for resuming training."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     if not regret_sum:
@@ -107,6 +117,8 @@ def save_checkpoint(
     r_values = np.stack(list(regret_sum.values()),  axis=0)
     s_keys   = np.array(list(strategy_sum.keys()),  dtype=np.int64)
     s_values = np.stack(list(strategy_sum.values()), axis=0)
+    v_keys   = np.array(list(visit_sum.keys()),     dtype=np.int64)
+    v_values = np.array(list(visit_sum.values()),   dtype=np.float64)
 
     np.savez(
         path,
@@ -114,23 +126,30 @@ def save_checkpoint(
         r_values   = r_values,
         s_keys     = s_keys,
         s_values   = s_values,
+        v_keys     = v_keys,
+        v_values   = v_values,
         iteration  = np.array(iteration),
     )
 
 
 def load_checkpoint(
     path: str = config.CHECKPOINT_PATH,
-) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], int]:
-    """Load regret/strategy sums. Returns (regret_sum, strategy_sum, iteration)."""
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[int, float], int]:
+    """Load sums. Returns (regret_sum, strategy_sum, visit_sum, iteration)."""
     data = np.load(path)
 
     regret_sum:   dict[int, np.ndarray] = {}
     strategy_sum: dict[int, np.ndarray] = {}
+    visit_sum:    dict[int, float]      = {}
 
     for k, v in zip(data["r_keys"], data["r_values"]):
         regret_sum[int(k)] = v.copy()
     for k, v in zip(data["s_keys"], data["s_values"]):
         strategy_sum[int(k)] = v.copy()
+    # v_keys/v_values absent in pre-CFR+ checkpoints — resume without visits.
+    if "v_keys" in data:
+        for k, v in zip(data["v_keys"], data["v_values"]):
+            visit_sum[int(k)] = float(v)
 
     iteration = int(data["iteration"])
-    return regret_sum, strategy_sum, iteration
+    return regret_sum, strategy_sum, visit_sum, iteration

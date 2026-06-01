@@ -24,7 +24,7 @@ _N_PLAYERS    = 6
 _INITIAL_STACK = 10_000
 _SMALL_BLIND   = 50
 _BIG_BLIND     = 100
-_MAX_RAISES_PER_STREET = 8   # must match deep_cfr/config.py and config.hpp
+_MAX_RAISES_PER_STREET = 4   # must match deep_cfr/config.py and config.hpp
 
 _INPUT_DIM = 308   # must match deep_cfr/config.py and deep_cfr_cpp/src/config.hpp
 
