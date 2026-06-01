@@ -8,9 +8,10 @@ import math
 import os
 import random
 import time
+from bisect import bisect_left as _bisect_left
 
 import numpy as np
-from eval7 import Card, evaluate
+from eval7 import Card, evaluate, handtype
 
 BOT_NAME   = "The House"
 BOT_AVATAR = "robot_1"
@@ -26,6 +27,19 @@ _BIG_BLIND     = 100
 _MAX_RAISES_PER_STREET = 8   # must match deep_cfr/config.py and config.hpp
 
 _INPUT_DIM = 308   # must match deep_cfr/config.py and deep_cfr_cpp/src/config.hpp
+
+
+def _envf(name: str, default: float) -> float:
+    """Read a float tuning knob from the environment, falling back to `default`.
+
+    Used so tools/tune_*.py can sweep parameters without editing this file. The
+    baked-in defaults are the production values; os is already imported and env
+    reads are validator-safe. Submission uses the defaults (no env set).
+    """
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
 
 # ── Encodings (must match deep_cfr_cpp/src/features.cpp) ─────────────────
 _CARD_IDX: dict[str, int] = {
@@ -574,28 +588,45 @@ def _mask_probs(full_probs: np.ndarray, legal: list) -> np.ndarray:
 
 
 def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
-                     equity: float | None = None) -> int:
+                     equity: float | None = None,
+                     exploit: tuple = (0.0, 0.0)) -> int:
     """
-    GTO network with a targeted MC equity correction on the fold/call decision.
+    GTO network with a targeted MC equity correction plus a read-derived exploit
+    bias (Module D1).
 
-    Raise sizing is owned entirely by the GTO network — immediate chip EV and
-    long-run strategy EV diverge for raise sizing (range balancing, multi-street
-    value, etc.), so a crude 1-level model only corrupts those decisions.
+    Raise *sizing* is still owned by the GTO network. We only adjust action-class
+    probabilities:
 
-    The only EV correction applied: when facing a bet (owed > 0), shift
-    probability between FOLD and CHECK_CALL in proportion to how far our MC
-    equity sits above or below the pot odds break-even.  The shift is bounded
-    so the network's read on the full situation still dominates.
+    - Facing a bet (owed > 0): shift between FOLD and CHECK_CALL by the MC equity
+      edge over pot odds, PLUS `callfold_shift` (>0 = call lighter vs over-bluffers
+      like maniacs; <0 = fold more vs value-heavy nits/passive lines).
+    - Able to bet (owed == 0): shift mass from CHECK_CALL into the bet actions by
+      `bet_shift` (>0) to c-bet/bluff harder vs an over-folding field, preserving
+      the network's bet-size preference.
 
-    `equity` may be supplied precomputed (shared with the risk gate) to avoid a
-    second Monte-Carlo rollout.
+    `exploit = (callfold_shift, bet_shift)` is read-gated upstream, so it is (0, 0)
+    with no confident read and the network's policy is used unchanged.
     """
     gto_arr = _mask_probs(gto_probs, legal)
+    callfold_shift, bet_shift = exploit
 
     owed = gs["amount_owed"]
     if owed <= 0:
-        # Check or bet — no fold/call tension, trust the network fully.
-        return legal[int(np.random.choice(len(legal), p=gto_arr))]
+        blended = gto_arr.copy()
+        call_idx = next((i for i, a in enumerate(legal) if a == _CHECK_CALL), None)
+        bet_idxs = [i for i, a in enumerate(legal) if a not in (_FOLD, _CHECK_CALL)]
+        if bet_shift > 0.0 and call_idx is not None and bet_idxs:
+            move = min(bet_shift, float(blended[call_idx]))
+            blended[call_idx] -= move
+            bet_mass = float(sum(blended[i] for i in bet_idxs))
+            if bet_mass > 1e-9:
+                for i in bet_idxs:           # keep the net's size distribution
+                    blended[i] += move * blended[i] / bet_mass
+            else:                            # net gives ~0 to bets → use half-pot
+                half = next((i for i, a in enumerate(legal) if a == _HALF), bet_idxs[0])
+                blended[half] += move
+            blended /= blended.sum()
+        return legal[int(np.random.choice(len(legal), p=blended))]
 
     pot = gs["pot"]
     if equity is None:
@@ -610,9 +641,9 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
     if fold_idx is None or call_idx is None:
         return legal[int(np.random.choice(len(legal), p=gto_arr))]
 
-    # Shift up to 20 pp between fold and call.  Positive edge → move mass from
-    # fold to call; negative edge → move mass from call to fold.
-    shift   = float(np.clip(equity_edge * 0.8, -0.20, 0.20))
+    # Equity edge (±20 pp) + read-derived exploit, capped at ±35 pp total.
+    shift   = float(np.clip(equity_edge * 0.8, -0.20, 0.20)) + callfold_shift
+    shift   = float(np.clip(shift, -0.35, 0.35))
     blended = gto_arr.copy()
     blended[fold_idx] = max(blended[fold_idx] - shift, 0.0)
     blended[call_idx] = max(blended[call_idx] + shift, 0.0)
@@ -841,8 +872,42 @@ def _preflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
 # ── Postflop engine (net or MC) + risk gate ────────────────────────────────
 
 
-def _net_postflop(gs: dict, equity: float | None) -> dict:
-    """GTO strategy net with the precomputed-equity fold/call correction."""
+_EXPLOIT_CONF = _envf("VLAD_EXPLOIT_CONF", 0.35)      # min read conf for D1 bias
+_EXPLOIT_CALL_MAX = _envf("VLAD_EXPLOIT_CALL_MAX", 0.15)  # max fold/call shift
+_EXPLOIT_BET_MAX = _envf("VLAD_EXPLOIT_BET_MAX", 0.15)    # max check→bet shift
+
+
+def _exploit_bias(gs: dict, profiles: dict) -> tuple:
+    """Read-derived (callfold_shift, bet_shift) for _realtime_search (Module D1).
+
+    Returns (0, 0) without a confident read so the GTO policy is used unchanged.
+    """
+    owed = gs["amount_owed"]
+    if owed > 0:
+        # Facing a bet: lean to call vs over-bluffers, fold vs value-heavy lines.
+        tag, conf = _last_aggressor_read(gs, profiles)
+        if conf < _EXPLOIT_CONF:
+            return 0.0, 0.0
+        if tag == "maniac":
+            return _EXPLOIT_CALL_MAX * conf, 0.0
+        if tag in ("nit", "station"):       # nits/stations rarely bluff-raise
+            return -_EXPLOIT_CALL_MAX * conf, 0.0
+        return 0.0, 0.0
+
+    # Able to bet: c-bet/bluff harder when the live field over-folds (nit-like).
+    best = 0.0
+    for p in gs["players"]:
+        if p["seat"] == gs["seat_to_act"] or p.get("state") not in ("active", "all_in"):
+            continue
+        tag, conf = _classify_opponent(profiles.get(p.get("bot_id")) or {})
+        if conf >= _EXPLOIT_CONF and tag == "nit":
+            best = max(best, conf)
+    return 0.0, _EXPLOIT_BET_MAX * best
+
+
+def _net_postflop(gs: dict, equity: float | None, profiles: dict | None = None) -> dict:
+    """GTO strategy net with the precomputed-equity fold/call correction and the
+    read-derived exploit bias (Module D1)."""
     vec   = _build_feature_vector(gs)
     probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
 
@@ -862,8 +927,55 @@ def _net_postflop(gs: dict, equity: float | None) -> dict:
             for _a in (_ALL_IN, _2X, _1_72X):
                 probs[_a] = probs[_a] * dampen
 
-    action_idx = _realtime_search(gs, legal, probs, equity=equity)
+    exploit = _exploit_bias(gs, profiles) if profiles else (0.0, 0.0)
+    action_idx = _realtime_search(gs, legal, probs, equity=equity, exploit=exploit)
     return _abstract_to_raw(action_idx, gs)
+
+
+# Offensive flop c-bet is OFF by default: it's the highest-variance, least-
+# validated change (head-to-head tournaments were inconclusive: +5k seed 1,
+# −37k seed 2). Enable with VLAD_CBET_BLUFF=1 for multi-seed validation before
+# shipping it on. The rest of the postflop improvements remain active.
+_CBET_BLUFF_ENABLED = _envf("VLAD_CBET_BLUFF", 0.0) >= 0.5
+
+
+def _has_initiative(gs: dict) -> bool:
+    """True if hero was the last preflop aggressor (took the betting lead)."""
+    log = gs.get("action_log", [])
+    if not log:
+        return False
+    annot = _reconstruct_streets(log)
+    last_pf = None
+    for entry, a in zip(log, annot):
+        if a["street"] == "preflop" and \
+                str(entry.get("action", "")).lower() in ("raise", "all_in"):
+            last_pf = entry.get("seat")
+    return last_pf == gs["seat_to_act"]
+
+
+def _should_cbet_bluff(gs: dict, equity: float, profile_counts: tuple,
+                       texture: str, n_active: int) -> bool:
+    """Disciplined flop c-bet/bluff when we can check (Module D1, MC path).
+
+    Mirrors cfr_equity_v28 (#4): as the preflop aggressor, HU/3-way, on a non-wet
+    board, with some backup equity, when the field is not a station/maniac (they
+    call). Fixes vlad's over-passive 'check when equity < call_thr' leak. The RNG
+    is seeded per action in decide(), so this is replay-deterministic.
+    """
+    if not _CBET_BLUFF_ENABLED:
+        return False
+    maniac, station, nit = profile_counts
+    if gs.get("street") != "flop":
+        return False
+    if n_active > 2 or equity < 0.28:
+        return False
+    if station > 0 or maniac > 0:            # they don't fold — don't bluff
+        return False
+    if texture == "wet":                     # opponents hold draws on wet boards
+        return False
+    if not _has_initiative(gs):
+        return False
+    return random.random() < 0.55
 
 
 def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
@@ -880,11 +992,26 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
     n_active = sum(1 for p in gs["players"]
                    if p.get("state") == "active" and p["seat"] != gs["seat_to_act"])
 
+    # Multiway + commitment-scaled call threshold (Module B3, equity realization:
+    # equity realizes worse multiway and when a big bet commits us — cf.
+    # cfr_equity_v28's `required += (n_opps-1)*0.015` and stack-fraction bumps).
     pot_odds  = owed / (pot + owed) if owed > 0 else 0.0
-    multi_adj = 0.20 if n_active >= 3 else 0.08
-    call_thr  = pot_odds + multi_adj - 0.03 * maniac + 0.04 * nit
+    multi_adj = min(0.08 + 0.06 * max(0, n_active - 1), 0.26)
+    commit_adj = 0.0
+    if owed >= stack * 0.40:
+        commit_adj += 0.04
+    if owed >= stack * 0.75:
+        commit_adj += 0.06
+    call_thr  = pot_odds + multi_adj + commit_adj - 0.03 * maniac + 0.04 * nit
 
     if equity < call_thr:
+        # Too weak to call/value-bet — but with initiative on a foldable board,
+        # c-bet for fold equity rather than meekly checking (Module D1, MC path).
+        if owed == 0 and _should_cbet_bluff(gs, equity, profile_counts,
+                                            texture, n_active):
+            target = max(round(pot * 0.5), min_r)
+            return {"action": "all_in"} if target >= all_tot \
+                else {"action": "raise", "amount": target}
         return {"action": "check"} if owed == 0 else {"action": "fold"}
 
     # Decide whether to raise/bet vs call/check.
@@ -908,8 +1035,10 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
         bet_frac += 0.15          # protect / deny equity on draws
     elif texture == "dry" and owed == 0:
         bet_frac -= 0.10          # small bets work on dry boards
+    # D2 inelastic value sizing: stations pay off oversized value bets (they call
+    # too wide), so bet bigger — cfr_equity_v28 uses +0.25 and ranks #4.
     if station > 0 and maniac == 0:
-        bet_frac += 0.15          # size up vs calling stations
+        bet_frac += 0.25
     if maniac > 0 and owed > 0:
         bet_frac += 0.15          # re-raise big vs maniacs
 
@@ -920,20 +1049,104 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
     return {"action": "raise", "amount": target}
 
 
+def _board_features(board: list) -> dict:
+    """Full-board texture analysis (Module E). Considers every dealt card, not
+    just the flop, so turn/river runouts (completed flushes, four-to-straight,
+    pairing of the board) are visible to sizing / risk / anti-punt logic.
+
+    Returns structured flags consumed by range-conditioned equity (B), the
+    anti-punt layer (C), and exploit sizing (D), plus the coarse wetness used by
+    the existing MC sizing and risk gate.
+    """
+    n = len(board)
+    base = {
+        "n": n, "paired": False, "two_pair": False, "trips": False,
+        "two_tone": False, "flush_possible": False, "four_flush": False,
+        "monotone": False, "max_suit": 0,
+        "connected": False, "straight_possible": False, "four_straight": False,
+        "straight_cards": 0,
+    }
+    if n < 3:
+        return base
+
+    ranks = [_RANK_ORDER[c[0]] for c in board]
+    suits = [c[1] for c in board]
+
+    rank_counts: dict = {}
+    for r in ranks:
+        rank_counts[r] = rank_counts.get(r, 0) + 1
+    pairs = sum(1 for v in rank_counts.values() if v >= 2)
+    suit_counts: dict = {}
+    for s in suits:
+        suit_counts[s] = suit_counts.get(s, 0) + 1
+    max_suit = max(suit_counts.values())
+
+    # Straightness: most board cards inside any 5-rank window (Ace counts high
+    # and low). 3+ => a straight is makeable with two hole cards; 4 => one card
+    # completes it (four-to-straight); span<=4 of distinct ranks => connected.
+    rank_set = set(ranks)
+    if 12 in rank_set:               # Ace also low (wheel)
+        rank_set = rank_set | {-1}
+    best = 0
+    for lo in range(-1, 9):          # window low edge from A-low(-1) up to T
+        cnt = sum(1 for r in rank_set if lo <= r <= lo + 4)
+        best = max(best, cnt)
+
+    distinct = sorted(set(ranks))
+    span = distinct[-1] - distinct[0]
+
+    base.update({
+        "paired": pairs >= 1 or any(v >= 2 for v in rank_counts.values()),
+        "two_pair": pairs >= 2,
+        "trips": any(v >= 3 for v in rank_counts.values()),
+        "max_suit": max_suit,
+        "two_tone": max_suit >= 2,
+        "flush_possible": max_suit >= 3,
+        "four_flush": max_suit >= 4,
+        "monotone": max_suit == n,
+        "straight_cards": best,
+        "straight_possible": best >= 3,
+        "four_straight": best >= 4,
+        "connected": len(distinct) >= 3 and span <= 4,
+    })
+    return base
+
+
 def _board_texture(board: list) -> str:
-    """Classify the flop texture: dry / semi / wet / paired."""
-    if len(board) < 3:
+    """Coarse texture category: none / dry / semi / wet / paired.
+
+    Flop (3 cards) classification is preserved byte-for-byte from the original
+    implementation; turn/river now read the full board (Module E) so a paired
+    turn, completed flush, or four-to-straight is reflected.
+    """
+    n = len(board)
+    if n < 3:
         return "none"
-    flop = board[:3]
-    ranks = [_RANK_ORDER[c[0]] for c in flop]
-    suits = [c[1] for c in flop]
-    if len(set(ranks)) < 3:
+
+    f = _board_features(board)
+
+    if n == 3:
+        # Original flop semantics, unchanged.
+        ranks = [_RANK_ORDER[c[0]] for c in board]
+        suits = [c[1] for c in board]
+        if len(set(ranks)) < 3:
+            return "paired"
+        two_tone = max(suits.count(s) for s in set(suits)) >= 2
+        connected = max(ranks) - min(ranks) <= 4
+        if two_tone and connected:
+            return "wet"
+        if two_tone or connected:
+            return "semi"
+        return "dry"
+
+    # Turn / river: full-board aware.
+    if f["paired"]:
         return "paired"
-    two_tone = max(suits.count(s) for s in set(suits)) >= 2
-    connected = max(ranks) - min(ranks) <= 4
-    if two_tone and connected:
+    wet = f["flush_possible"] or f["four_straight"]
+    semi = f["two_tone"] or f["straight_possible"] or f["connected"]
+    if wet:
         return "wet"
-    if two_tone or connected:
+    if semi:
         return "semi"
     return "dry"
 
@@ -984,19 +1197,215 @@ def _risk_gate(action: dict, gs: dict, equity: float) -> dict:
     return {"action": "fold"}
 
 
+# ── Anti-punt override layer (Module C) ─────────────────────────────────────
+#
+# Final guardrail after the engine + risk gate: catches the specific recurring
+# leaks that bleed chips, but ONLY when we have a confident opponent read, so it
+# never fires vs unknown / strong bots (and so leaves the golden behavior intact
+# until reads accumulate). Reverts the offending aggressive/thin line to the
+# cheapest sane alternative.
+
+_HAND_TIER = {
+    "High Card": "weak", "Pair": "pair", "Two Pair": "medium",
+    "Trips": "strong", "Three of a Kind": "strong", "Straight": "strong",
+    "Flush": "strong", "Full House": "very_strong", "Quads": "very_strong",
+    "Four of a Kind": "very_strong", "Straight Flush": "very_strong",
+}
+_ANTI_PUNT_CONF = _envf("VLAD_ANTIPUNT_CONF", 0.35)   # min read conf to fire
+
+
+def _made_hand_tier(gs: dict) -> str:
+    """Hero's current made-hand tier: weak / pair / medium / strong / very_strong."""
+    board = gs.get("community_cards", [])
+    if len(board) < 3:
+        return "weak"
+    score = evaluate([Card(c) for c in gs["your_cards"]] + [Card(c) for c in board])
+    return _HAND_TIER.get(str(handtype(score)), "weak")
+
+
+def _last_aggressor_read(gs: dict, profiles: dict) -> tuple:
+    """(tag, conf) for the player we're facing a bet from. When owed > 0 the most
+    recent raise/all-in in the hand is, by definition, the live aggressor (bets
+    reset each street), so the last aggressive entry suffices — no street
+    reconstruction needed."""
+    seats_by = {p["seat"]: p.get("bot_id") for p in gs["players"]}
+    last_seat = None
+    for entry in gs.get("action_log", []):
+        if str(entry.get("action", "")).lower() in ("raise", "all_in"):
+            last_seat = entry.get("seat")
+    if last_seat is None or last_seat == gs["seat_to_act"]:
+        return "unknown", 0.0
+    return _classify_opponent(profiles.get(seats_by.get(last_seat)) or {})
+
+
+def _field_station_read(gs: dict, profiles: dict) -> tuple:
+    """(tag, conf) of the most station-like active opponent — worst to bluff into."""
+    best = ("unknown", 0.0)
+    for p in gs["players"]:
+        if p["seat"] == gs["seat_to_act"] or p.get("state") not in ("active", "all_in"):
+            continue
+        tag, conf = _classify_opponent(profiles.get(p.get("bot_id")) or {})
+        if tag == "station" and conf > best[1]:
+            best = (tag, conf)
+    return best
+
+
+def _n_active_opponents(gs: dict) -> int:
+    return sum(1 for p in gs["players"]
+               if p["seat"] != gs["seat_to_act"] and p.get("state") in ("active", "all_in"))
+
+
+def _anti_punt(action: dict, gs: dict, equity: float, profiles: dict) -> dict:
+    """Revert known-bad aggressive/thin lines when a confident read says so."""
+    act = action.get("action")
+    if act in ("fold", "check"):
+        return action
+
+    street = gs.get("street", "")
+    owed = gs["amount_owed"]
+    pot = max(1, gs["pot"])
+    can_check = gs.get("can_check", owed == 0)
+    aggressive = act in ("raise", "all_in")
+    tier = _made_hand_tier(gs)
+
+    def _passive():
+        return {"action": "check"} if can_check else {"action": "call"}
+
+    # 1. River air-bluff into a station (no draws exist on the river).
+    if street == "river" and aggressive and tier in ("weak", "pair"):
+        _, conf = _field_station_read(gs, profiles)
+        if conf >= _ANTI_PUNT_CONF:
+            return {"action": "check"} if can_check else {"action": "fold"}
+
+    # 2. Oversized river bluff-catch vs a nit/passive line.
+    if street == "river" and act == "call" and owed > 0.55 * pot \
+            and tier in ("weak", "pair"):
+        tag, conf = _last_aggressor_read(gs, profiles)
+        if tag == "nit" and conf >= _ANTI_PUNT_CONF:
+            return {"action": "fold"}
+
+    # 3. Low-equity multiway c-bet/raise on a wet board (draws keep equity up,
+    #    so the equity floor naturally spares semi-bluffs).
+    if street in ("flop", "turn") and aggressive and _n_active_opponents(gs) >= 2 \
+            and tier in ("weak", "pair") and equity < 0.45:
+        if _board_texture(gs.get("community_cards", [])) == "wet":
+            return _passive()
+
+    return action
+
+
 def _postflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
-    """Route the postflop decision through the configured engine + risk gate."""
+    """Route the postflop decision through the configured engine, risk gate, and
+    the anti-punt override layer."""
     equity = _run_mc(gs, max_iters=1_200)
+
+    my_bot_id = next((p["bot_id"] for p in gs["players"]
+                      if p["seat"] == gs["seat_to_act"]), None)
+    profiles = _build_opponent_profiles(gs.get("match_action_log", []), my_bot_id)
 
     if _POSTFLOP_ENGINE == "mc" or _GTO_LAYERS is None:
         action = _mc_postflop(gs, equity, profile_counts)
     else:
-        action = _net_postflop(gs, equity)
+        action = _net_postflop(gs, equity, profiles)
 
-    return _risk_gate(action, gs, equity)
+    action = _risk_gate(action, gs, equity)
+    return _anti_punt(action, gs, equity, profiles)
 
 
-# ── Monte Carlo equity (fallback) ──────────────────────────────────────────
+# ── Range-conditioned equity (Module B) ────────────────────────────────────
+#
+# Uniform-random opponent hands overvalue marginal holdings vs tight ranges and
+# undervalue them vs loose ones. We bias each opponent's sampled hole cards by a
+# per-opponent strength floor (a starting-hand percentile), derived from their
+# archetype tag + confidence. Cheap rejection sampling on a Chen-score percentile
+# keeps the rollout fast.
+
+def _build_hand_pctl():
+    """Precompute starting-hand strength percentiles by Chen score, weighted by
+    combo counts (pair=6, suited=4, offsuit=12). Returns a sorted list of the
+    1326 combos' Chen scores for bisect-based percentile lookup."""
+    scores = []
+    for i, hi in enumerate(RANKS):
+        for j in range(0, i + 1):
+            lo = RANKS[j]
+            if i == j:
+                scores.extend([_chen_score(hi, lo, False)] * 6)
+            else:
+                scores.extend([_chen_score(hi, lo, True)] * 4)
+                scores.extend([_chen_score(hi, lo, False)] * 12)
+    scores.sort()
+    return scores
+
+
+_HAND_PCTL_SORTED = _build_hand_pctl()
+_N_COMBOS = len(_HAND_PCTL_SORTED)   # 1326
+
+
+def _hand_pctl(c1: str, c2: str) -> float:
+    """Fraction of starting combos weaker than this hand (0..1), by Chen score."""
+    r1, r2 = c1[0], c2[0]
+    if _RANK_ORDER[r1] >= _RANK_ORDER[r2]:
+        hi, lo = r1, r2
+    else:
+        hi, lo = r2, r1
+    suited = c1[1] == c2[1]
+    chen = _chen_score(hi, lo, suited)
+    return _bisect_left(_HAND_PCTL_SORTED, chen) / _N_COMBOS
+
+
+# Base continuing-range strength floors (percentile) by archetype. Higher = the
+# opponent only continues with stronger hands, so we sample them tighter.
+_RANGE_FLOOR_BASE = {
+    "nit": _envf("VLAD_FLOOR_NIT", 0.78), "tag": 0.52, "normal": 0.28,
+    "unknown": 0.0, "station": _envf("VLAD_FLOOR_STATION", 0.08), "maniac": 0.04,
+}
+_FLOOR_TURN  = _envf("VLAD_FLOOR_TURN", 0.05)   # street bump: opp still in on turn
+_FLOOR_RIVER = _envf("VLAD_FLOOR_RIVER", 0.10)  # ...and on the river
+# conf=0 anchor. Kept at 0 so an unknown opponent stays uniform on the flop
+# (unbiased); the street bump below still reflects "still in the hand" postflop.
+_RANGE_FLOOR_NEUTRAL = 0.0
+
+
+def _seat_range_floor(tag: str, conf: float, street: str) -> float:
+    """Per-opponent starting-hand percentile floor for MC rejection sampling.
+
+    Blends the archetype base floor toward neutral by confidence (weak reads stay
+    near uniform), then nudges up postflop: an opponent still in the hand on later
+    streets holds a stronger range on average.
+    """
+    base = _RANGE_FLOOR_BASE.get(tag, _RANGE_FLOOR_NEUTRAL)
+    floor = _RANGE_FLOOR_NEUTRAL + (base - _RANGE_FLOOR_NEUTRAL) * max(0.0, min(1.0, conf))
+    floor += {"flop": 0.0, "turn": _FLOOR_TURN, "river": _FLOOR_RIVER}.get(street, 0.0)
+    return max(0.0, min(0.92, floor))
+
+
+def _hand_aggression_bump(gs: dict) -> float:
+    """Range-floor bump from aggression shown THIS hand (Module B, action-
+    conditioned — cfr_equity_v28's `opp_floor` idea). 3-bets+ and postflop barrels
+    mean the live range is stronger than the archetype alone implies. Bounded.
+    """
+    log = gs.get("action_log", [])
+    if not log:
+        return 0.0
+    annot = _reconstruct_streets(log)
+    pf_raises = post_raises = 0
+    for entry, a in zip(log, annot):
+        if str(entry.get("action", "")).lower() not in ("raise", "all_in"):
+            continue
+        if a["street"] == "preflop":
+            pf_raises += 1
+        else:
+            post_raises += 1
+    # Open raise (1 preflop raise) is baseline; 3-bets+ signal strength.
+    bump = 0.06 * max(0, pf_raises - 1) + 0.06 * post_raises
+    pot = max(1, gs.get("pot", 1))
+    owed = gs.get("amount_owed", 0)
+    if owed >= 0.5 * pot:
+        bump += 0.04
+    return min(0.25, bump)
+
+
+# ── Monte Carlo equity ──────────────────────────────────────────────────────
 
 def monte_carlo_equity(
     hole_cards: list,
@@ -1005,16 +1414,39 @@ def monte_carlo_equity(
     num_opponents: int = 1,
     time_limit: float = 0.5,
     max_iters: int | None = None,
+    opp_floors: list | None = None,
 ) -> float:
+    """Monte-Carlo equity vs `num_opponents`. If `opp_floors` is given (one
+    strength percentile per opponent), each opponent's hole cards are rejection-
+    sampled to sit at/above that floor — range-conditioned equity (Module B).
+    """
     start = time.time()
     wins, iters = 0, 0
+    need_board = 5 - len(board_cards)
+    n_rem = len(remaining_cards)
+    floors = opp_floors if opp_floors else None
     while (max_iters is None and time.time() - start < time_limit) or \
           (max_iters is not None and iters < max_iters):
         random.shuffle(remaining_cards)
-        opp_hands = [remaining_cards[i * 2: i * 2 + 2] for i in range(num_opponents)]
-        board     = list(board_cards)
-        for i in range(5 - len(board_cards)):
-            board.append(remaining_cards[2 * num_opponents + i])
+        if floors is None:
+            opp_hands = [remaining_cards[i * 2: i * 2 + 2] for i in range(num_opponents)]
+            idx = 2 * num_opponents
+        else:
+            opp_hands = []
+            idx = 0
+            for f in floors:
+                hand = remaining_cards[idx:idx + 2]
+                idx += 2
+                tries = 0
+                # Resample (bounded) until the hand clears the opponent's floor.
+                while (f > 0.0 and tries < 3 and idx + 2 <= n_rem
+                       and _hand_pctl(str(hand[0]), str(hand[1])) < f):
+                    hand = remaining_cards[idx:idx + 2]
+                    idx += 2
+                    tries += 1
+                opp_hands.append(hand)
+        board = list(board_cards)
+        board.extend(remaining_cards[idx:idx + need_board])
         my_score   = evaluate(hole_cards + board)
         opp_scores = [evaluate(oh + board) for oh in opp_hands]
         best       = max(my_score, *opp_scores)
@@ -1055,63 +1487,365 @@ def choose_action(mc_equity, pot, amount_owed, already_bet, min_raise_to, your_s
     return {"action": "check"} if amount_owed == 0 else {"action": "call"}
 
 
+# ── Opponent modeling: street reconstruction (Module A1) ───────────────────
+#
+# Neither the cross-hand match_action_log nor the within-hand action_log carries
+# a `street` field (see engine: only {hand_num,seat,bot_id,action,amount} /
+# {seat,action,amount}). We reconstruct street boundaries by replaying the
+# betting round structurally: a round closes when every live, non-all-in seat
+# has acted and matched the last aggression. Crucially this is driven by action
+# *type*, not amount — the cross-hand log records the bot's raw return (amounts
+# are often None and may differ from what the engine executed), so amounts are
+# unreliable, but the action sequence and ordering are exactly the engine's.
+#
+# Limitation: short all-ins that don't reopen action cannot be distinguished
+# without chip accounting, so every raise/all_in is treated as reopening. This
+# can over-extend a street in the rare short-all-in case; the 4-street clamp and
+# per-hand reset bound the error, and aggregate opponent stats wash it out.
+
+_STREET_NAMES = ("preflop", "flop", "turn", "river")
+_BLIND_ACTIONS = frozenset(("small_blind", "big_blind"))
+_AGGRESSIVE_ACTIONS = frozenset(("raise", "all_in", "bet"))
+_PASSIVE_ACTIONS = frozenset(("check", "call"))
+
+
+def _reconstruct_streets(actions: list, dealt_seats=None) -> list:
+    """Annotate each action of a SINGLE hand with the street it occurred on.
+
+    Works for both log formats:
+      - within-hand action_log: includes leading small_blind/big_blind entries.
+      - cross-hand match_action_log slice (one hand_num): no blind entries,
+        bot-raw action names, amounts possibly missing.
+
+    Args:
+        actions: ordered list of dicts, each with at least "seat" and "action".
+        dealt_seats: optional iterable of seats dealt into the hand. If omitted,
+            inferred as every distinct seat appearing in `actions`.
+
+    Returns a list aligned 1:1 with `actions`; each element is a dict
+    ``{"street": str, "street_aggr_before": int}`` where street_aggr_before is
+    the count of aggressive actions already taken on that street before this
+    entry (blinds excluded). Blind entries are labeled preflop with 0.
+    """
+    if dealt_seats is None:
+        live = {a.get("seat") for a in actions if a.get("seat") is not None}
+    else:
+        live = set(dealt_seats)
+
+    folded: set = set()
+    all_in: set = set()
+
+    def _fresh_need() -> set:
+        return set(live) - folded - all_in
+
+    need = _fresh_need()
+    street_idx = 0
+    aggr_count = 0  # aggressive actions on the current street (blinds excluded)
+    out = []
+
+    for entry in actions:
+        act = str(entry.get("action", "")).lower().strip()
+
+        if act in _BLIND_ACTIONS:
+            # Blinds are forced posts, not voluntary actions: they neither
+            # consume a seat's obligation to act (BB keeps the option) nor count
+            # as aggression. They do confirm the poster is in the hand.
+            out.append({"street": "preflop", "street_aggr_before": 0})
+            continue
+
+        out.append({"street": _STREET_NAMES[street_idx],
+                    "street_aggr_before": aggr_count})
+
+        seat = entry.get("seat")
+        need.discard(seat)
+
+        if act == "fold":
+            folded.add(seat)
+        elif act == "all_in":
+            all_in.add(seat)
+            aggr_count += 1
+            need = (live - folded - all_in) - {seat}
+        elif act in _AGGRESSIVE_ACTIONS:  # raise / bet
+            aggr_count += 1
+            need = (live - folded - all_in) - {seat}
+        # passive (check/call) or unknown → only consumes this seat's turn.
+
+        if not need:
+            # Betting round closed → subsequent entries belong to the next street.
+            if street_idx < len(_STREET_NAMES) - 1:
+                street_idx += 1
+            aggr_count = 0
+            need = _fresh_need()
+
+    return out
+
+
+# ── Opponent modeling: leak profiles + archetype (Modules A2 / A3) ──────────
+#
+# Built on _reconstruct_streets. We aggregate per-bot_id leak counters across
+# the rolling cross-hand match_action_log (keyed on bot_id, NOT seat: seats are
+# re-indexed to the alive set every hand). All stats here are position-
+# independent and reconstructable from {hand_num,seat,bot_id,action,street,
+# street_aggr_before} alone.
+#
+# Deferred (needs per-hand blind/position inference, which the cross-hand log
+# does not carry): fold_to_steal, positional VPIP/PFR splits. Tracked in
+# IMPROVEMENT_PLAN.md.
+#
+# Empirical-Bayes blend: each rate is shrunk toward a population prior with
+# weight min(1, opportunities / target), so sparse reads stay near baseline and
+# the confidence rises with sample size.
+
+# (prior_mean, shrinkage_target) per leak. Priors are 6-max population defaults.
+_LEAK_PRIORS = {
+    "vpip":              (0.24, 12),
+    "pfr":               (0.17, 12),
+    "pf_reraise":        (0.07, 8),    # 3-bet-ish: reraise when facing a raise
+    "fold_to_flop_cbet": (0.50, 8),
+    "fold_to_turn":      (0.45, 6),
+    "river_call":        (0.50, 6),
+}
+_AGGR_PRIOR = 1.4          # aggression factor (aggr actions / calls) prior
+_MIN_HANDS_FOR_TAG = 8     # below this, opponent stays "unknown"
+_PROFILE_ACT_CONF = 0.30   # min classification confidence before we exploit a read
+
+
+def _fresh_opp_counters() -> dict:
+    return {
+        "hands": 0, "actions": 0,
+        "vpip": 0, "pfr": 0,
+        "pf_reraise_opp": 0, "pf_reraise": 0,
+        "flop_cbet_faced": 0, "flop_cbet_fold": 0,
+        "turn_faced": 0, "turn_fold": 0,
+        "river_faced": 0, "river_call": 0,
+        "n_aggr": 0, "n_call": 0,
+        "saw_flop": 0, "saw_river": 0,
+    }
+
+
+def _iter_hands(match_log: list):
+    """Yield (hand_num, [entries]) groups from a chronological match log.
+
+    Entries for a hand are contiguous (the engine appends in play order), so we
+    split on hand_num changes without sorting.
+    """
+    cur_id = _SENTINEL = object()
+    bucket: list = []
+    for entry in match_log:
+        hid = entry.get("hand_num")
+        if hid != cur_id and bucket:
+            yield cur_id, bucket
+            bucket = []
+        cur_id = hid
+        bucket.append(entry)
+    if bucket:
+        yield cur_id, bucket
+
+
+def _build_opponent_profiles(match_log: list, my_bot_id=None) -> dict:
+    """Aggregate per-bot_id leak counters from the rolling match_action_log.
+
+    Returns ``{bot_id: counters}``. Pass ``my_bot_id`` to exclude hero.
+    """
+    profiles: dict = {}
+    _AGGR = ("raise", "all_in")
+    _VOL = ("call", "raise", "all_in")
+
+    for _hand_num, entries in _iter_hands(match_log):
+        annot = _reconstruct_streets(entries)
+        seen_vol: dict = {}      # bot_id -> voluntarily entered preflop
+        seen_raise: dict = {}    # bot_id -> raised preflop
+        present: set = set()
+        saw_flop: set = set()
+        saw_river: set = set()
+
+        for entry, a in zip(entries, annot):
+            bid = entry.get("bot_id")
+            if bid is None or bid == my_bot_id:
+                continue
+            act = str(entry.get("action", "")).lower().strip()
+            if act in _BLIND_ACTIONS:
+                continue
+            street = a["street"]
+            faced = a["street_aggr_before"] >= 1
+
+            prof = profiles.setdefault(bid, _fresh_opp_counters())
+            present.add(bid)
+            prof["actions"] += 1
+
+            if street == "preflop":
+                if act in _VOL:
+                    seen_vol[bid] = True
+                if act in _AGGR:
+                    seen_raise[bid] = True
+                if faced:
+                    prof["pf_reraise_opp"] += 1
+                    if act in _AGGR:
+                        prof["pf_reraise"] += 1
+            else:
+                saw_flop.add(bid)
+                if street == "river":
+                    saw_river.add(bid)
+                if street == "flop" and faced and act in ("fold", "call") + _AGGR:
+                    prof["flop_cbet_faced"] += 1
+                    if act == "fold":
+                        prof["flop_cbet_fold"] += 1
+                elif street == "turn" and faced and act in ("fold", "call") + _AGGR:
+                    prof["turn_faced"] += 1
+                    if act == "fold":
+                        prof["turn_fold"] += 1
+                elif street == "river" and faced and act in ("fold", "call") + _AGGR:
+                    prof["river_faced"] += 1
+                    if act == "call":
+                        prof["river_call"] += 1
+
+            if act in _AGGR:
+                prof["n_aggr"] += 1
+            elif act == "call":
+                prof["n_call"] += 1
+
+        for bid in present:
+            prof = profiles[bid]
+            prof["hands"] += 1
+            if seen_vol.get(bid):
+                prof["vpip"] += 1
+            if seen_raise.get(bid):
+                prof["pfr"] += 1
+            if bid in saw_flop:
+                prof["saw_flop"] += 1
+            if bid in saw_river:
+                prof["saw_river"] += 1
+
+    return profiles
+
+
+def _shrunk_rate(succ: int, opp: int, key: str) -> tuple[float, float]:
+    """Empirical-Bayes rate + confidence (0..1) for a leak counter."""
+    prior, target = _LEAK_PRIORS[key]
+    if opp <= 0:
+        return prior, 0.0
+    w = min(1.0, opp / target)
+    return prior * (1.0 - w) + (succ / opp) * w, w
+
+
+def _opp_leaks(counters: dict) -> dict:
+    """Derive blended leak rates + confidences from raw counters."""
+    hands = counters.get("hands", 0)
+    vpip, vpip_c = _shrunk_rate(counters["vpip"], hands, "vpip")
+    pfr, pfr_c = _shrunk_rate(counters["pfr"], hands, "pfr")
+    rer, rer_c = _shrunk_rate(counters["pf_reraise"], counters["pf_reraise_opp"], "pf_reraise")
+    fc, fc_c = _shrunk_rate(counters["flop_cbet_fold"], counters["flop_cbet_faced"], "fold_to_flop_cbet")
+    tf, tf_c = _shrunk_rate(counters["turn_fold"], counters["turn_faced"], "fold_to_turn")
+    rc, rc_c = _shrunk_rate(counters["river_call"], counters["river_faced"], "river_call")
+    af = counters["n_aggr"] / counters["n_call"] if counters["n_call"] > 0 else (
+        _AGGR_PRIOR if counters["n_aggr"] == 0 else float(counters["n_aggr"]))
+    return {
+        "hands": hands,
+        "vpip": vpip, "vpip_conf": vpip_c,
+        "pfr": pfr, "pfr_conf": pfr_c,
+        "pf_reraise": rer, "pf_reraise_conf": rer_c,
+        "fold_to_flop_cbet": fc, "fold_to_flop_cbet_conf": fc_c,
+        "fold_to_turn": tf, "fold_to_turn_conf": tf_c,
+        "river_call": rc, "river_call_conf": rc_c,
+        "aggression_factor": af,
+    }
+
+
+def _classify_opponent(counters: dict) -> tuple[str, float]:
+    """Map a profile to (archetype, confidence) in {nit,station,maniac,tag,normal,unknown}.
+
+    Confidence ramps with hands observed and gates downstream exploits.
+    """
+    hands = counters.get("hands", 0)
+    if hands < _MIN_HANDS_FOR_TAG:
+        return "unknown", 0.0
+
+    L = _opp_leaks(counters)
+    vpip, pfr, af = L["vpip"], L["pfr"], L["aggression_factor"]
+    river_call = L["river_call"]
+    confidence = min(0.9, 0.25 + hands / 50.0)
+
+    if vpip < 0.16 and pfr < 0.12:
+        tag = "nit"          # tight: a preflop-folder never reaches a flop, so
+        #                      VPIP/PFR define the nit; fold_cbet only refines.
+    elif vpip > 0.42 and (pfr > 0.30 or af > 2.5):
+        tag = "maniac"
+    elif vpip > 0.30 and af < 1.0 and river_call > 0.55:
+        tag = "station"
+    elif 0.18 <= vpip <= 0.30 and pfr >= 0.14 and af >= 1.3:
+        tag = "tag"
+    else:
+        tag = "normal"
+    return tag, confidence
+
+
 def _opponent_profile_counts(
     match_log: list, players: list, my_seat: int
 ) -> tuple[int, int, int]:
-    """Return (maniac_count, calling_station_count, nit_count) among active opponents."""
-    my_bot_id = next((p["bot_id"] for p in players if p["seat"] == my_seat), None)
-    counts: dict[str, dict] = {}
-    for entry in match_log:
-        bid = entry.get("bot_id")
-        if bid is None or bid == my_bot_id:
-            continue
-        act = entry.get("action", "")
-        if bid not in counts:
-            counts[bid] = {
-                "fold": 0, "check": 0, "call": 0, "raise": 0, "all_in": 0, "total": 0
-            }
-        if act in counts[bid]:
-            counts[bid][act] += 1
-        counts[bid]["total"] += 1
+    """Return (maniac_count, calling_station_count, nit_count) among active opponents.
 
-    profiles: dict[str, str] = {}
-    for bid, c in counts.items():
-        t = c["total"]
-        if t < 5:
-            profiles[bid] = "unknown"
-        elif (c["all_in"] + c["raise"]) / t > 0.50:
-            profiles[bid] = "maniac"
-        elif c["call"] / t > 0.50:
-            profiles[bid] = "calling_station"
-        elif c["fold"] / t > 0.60:
-            profiles[bid] = "nit"
-        else:
-            profiles[bid] = "normal"
+    Now backed by the street-aware leak profiler (Modules A2/A3): per-bot_id
+    archetype classification with empirical-Bayes confidence, replacing the old
+    raw action-type ratios. Only reads with confidence ≥ _PROFILE_ACT_CONF count,
+    so sparse/uncertain opponents fall through to neutral (no nudge).
+    """
+    my_bot_id = next((p["bot_id"] for p in players if p["seat"] == my_seat), None)
+    profiles = _build_opponent_profiles(match_log, my_bot_id)
 
     maniac = station = nit = 0
     for p in players:
         if p["seat"] == my_seat or p["state"] in ("folded", "busted"):
             continue
-        label = profiles.get(p["bot_id"], "unknown")
-        if label == "maniac":
+        prof = profiles.get(p["bot_id"])
+        if prof is None:
+            continue
+        tag, conf = _classify_opponent(prof)
+        if conf < _PROFILE_ACT_CONF:
+            continue
+        if tag == "maniac":
             maniac += 1
-        elif label == "calling_station":
+        elif tag == "station":
             station += 1
-        elif label == "nit":
+        elif tag == "nit":
             nit += 1
     return maniac, station, nit
 
 
-def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = None) -> float:
+def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = None,
+            range_conditioned: bool = True) -> float:
     my_cards    = list(map(Card, game_state["your_cards"]))
     board_cards = list(map(Card, game_state["community_cards"]))
     rest_cards  = [c for c in ALL_CARDS if c not in my_cards and c not in board_cards]
-    n_opp = max(sum(
-        p["state"] in ("active", "all_in")
-        for p in game_state["players"]
-        if p["seat"] != game_state["seat_to_act"]
-    ), 1)
-    return monte_carlo_equity(my_cards, board_cards, rest_cards, n_opp, time_limit, max_iters)
+    my_seat = game_state["seat_to_act"]
+    active_opps = [p for p in game_state["players"]
+                   if p["seat"] != my_seat and p["state"] in ("active", "all_in")]
+    n_opp = max(len(active_opps), 1)
+
+    # Range-conditioned sampling (Module B): bias each live opponent's hole cards
+    # by a strength floor derived from their archetype read. Self-contained so the
+    # GTO path, MC path, and fallback all share it.
+    opp_floors = None
+    if range_conditioned and active_opps:
+        my_bot_id = next((p["bot_id"] for p in game_state["players"]
+                          if p["seat"] == my_seat), None)
+        profiles = _build_opponent_profiles(
+            game_state.get("match_action_log", []), my_bot_id)
+        street = game_state.get("street", "flop")
+        # Action-conditioned bump (cfr_equity_v28 #4): aggression shown THIS hand
+        # (3-bets+, postflop barrels, big bets) means a stronger live range than
+        # the archetype alone implies. Applied to every still-live opponent.
+        aggr_bump = _hand_aggression_bump(game_state)
+        opp_floors = []
+        for p in active_opps:
+            tag, conf = _classify_opponent(profiles.get(p["bot_id"]) or {})
+            # A maniac's aggression is bluffy, not strong — do NOT tighten their
+            # assumed range when they bet (cf. cfr_equity_v28's maniac floor cut).
+            bump = 0.0 if (tag == "maniac" and conf >= 0.35) else aggr_bump
+            floor = _seat_range_floor(tag, conf, street) + bump
+            opp_floors.append(min(0.92, floor))
+
+    return monte_carlo_equity(my_cards, board_cards, rest_cards, n_opp,
+                              time_limit, max_iters, opp_floors=opp_floors)
 
 
 # ── Main entry point ───────────────────────────────────────────────────────
