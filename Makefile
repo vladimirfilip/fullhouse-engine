@@ -27,10 +27,12 @@ install-train: install
 	pip3 install --index-url https://download.pytorch.org/whl/cpu torch
 	pip3 install pybind11
 
-# ── Python: extra deps for offline Deep CFR training (CUDA 12.1 wheel) ───────
+# ── Python: extra deps for offline Deep CFR training (CUDA 12.8 wheel) ───────
+# cu128 is the first wheel line shipping Blackwell (sm_120) kernels, required
+# for RTX 50-series GPUs. cu121 only goes up to sm_90 → "no kernel image".
 install-train-gpu: install
-	@echo ">> Installing training-only deps (PyTorch CUDA 12.1, pybind11)"
-	pip3 install --index-url https://download.pytorch.org/whl/cu121 torch
+	@echo ">> Installing training-only deps (PyTorch CUDA 12.8, pybind11)"
+	pip3 install --index-url https://download.pytorch.org/whl/cu128 torch
 	pip3 install pybind11
 
 # ── System packages required to build the C++ data-gen extension + 3.10 venv ─
@@ -73,8 +75,8 @@ install-vm: install-system $(VENV)/bin/python
 	$(VENV)/bin/pip install --no-build-isolation eval7==0.1.7
 	@echo ">> Installing rest of sandbox requirements"
 	$(VENV)/bin/pip install flask numpy scipy treys scikit-learn
-	@echo ">> Installing training-only deps (PyTorch CUDA 12.1, pybind11)"
-	$(VENV)/bin/pip install --index-url https://download.pytorch.org/whl/cu121 torch
+	@echo ">> Installing training-only deps (PyTorch CUDA 12.8, pybind11)"
+	$(VENV)/bin/pip install --index-url https://download.pytorch.org/whl/cu128 torch
 	$(VENV)/bin/pip install pybind11
 	@$(MAKE) build-cpp
 	@echo ">> VM ready. Activate the venv:"

@@ -185,6 +185,7 @@ def train(
     round_iters = checkpoint_every if pool is None else min(sync_every,
                                                             checkpoint_every)
     next_ckpt = (iter_done // checkpoint_every + 1) * checkpoint_every
+    prev_premium: dict[str, np.ndarray] | None = None
     t0 = time.time()
 
     try:
@@ -224,6 +225,10 @@ def train(
                 if verbose:
                     print(f"[preflop_cfr] Checkpoint saved at iter {iter_done}.",
                           flush=True)
+                    _visit_histogram(strategy_sum)
+                    cur_premium = _premium_snapshot(strategy_sum)
+                    _print_premium_drift(prev_premium, cur_premium)
+                    prev_premium = cur_premium
     finally:
         if pool is not None:
             pool.close()
@@ -236,6 +241,93 @@ def train(
 
     _print_spot_check(strategy_sum, verbose)
     return regret_sum, strategy_sum
+
+
+# ── Convergence diagnostics ─────────────────────────────────────────────────
+
+# Per-info-set "visits" = sum of the accumulated average-strategy mass.  Each
+# opponent-node visit adds a strategy vector that sums to 1 over legal actions,
+# so this total tracks the visit count and is exactly the quantity export.py
+# thresholds with PRUNE_MIN_VISITS — keeping the diagnostic and the prune metric
+# consistent.
+_VISIT_BINS = [0, 1, 10, 100, 1_000, 10_000]
+
+# Premium UTG-open hands to watch for strategy drift (the ones the old
+# unconverged table mangled — see preflop-table-disabled memory).
+_PREMIUM_HANDS = ("AA", "KK", "QQ", "JJ", "AKs", "AKo")
+
+
+def _visit_histogram(strategy_sum: dict[int, np.ndarray]) -> None:
+    """Print a visits/info-set histogram + summary against TARGET_VISITS_PER_SET."""
+    if not strategy_sum:
+        print("[preflop_cfr] no info sets yet.", flush=True)
+        return
+
+    counts = np.fromiter((v.sum() for v in strategy_sum.values()),
+                         dtype=np.float64, count=len(strategy_sum))
+    target = config.TARGET_VISITS_PER_SET
+    edges  = _VISIT_BINS + [float("inf")]
+    print(f"[preflop_cfr] visits/info-set over {len(counts):,} sets "
+          f"(mean={counts.mean():.0f} median={np.median(counts):.0f}):", flush=True)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        n = int(((counts >= lo) & (counts < hi)).sum())
+        hi_label = "inf" if hi == float("inf") else f"{int(hi)}"
+        bar = "#" * min(40, int(40 * n / len(counts)))
+        print(f"    [{int(lo):>6}, {hi_label:>6})  {n:>9,}  {bar}", flush=True)
+    met = int((counts >= target).sum())
+    print(f"[preflop_cfr] {met:,}/{len(counts):,} "
+          f"({100*met/len(counts):.1f}%) sets >= target {target:,} visits",
+          flush=True)
+
+
+def _premium_snapshot(strategy_sum: dict[int, np.ndarray]) -> dict[str, np.ndarray]:
+    """Average-strategy vectors for the premium UTG-open hands (history empty)."""
+    from preflop_cfr.cards import BUCKET_INFO, RANKS
+    from preflop_cfr.abstraction import infoset_key
+
+    name_to_bucket: dict[str, int] = {}
+    for bucket, (hi, lo, suited) in enumerate(BUCKET_INFO):
+        suit_char = "s" if suited else "o" if hi != lo else ""
+        name = f"{RANKS[hi]}{RANKS[lo]}{suit_char}"
+        name_to_bucket[name] = bucket
+
+    utg_pos = 3  # (UTG_seat - dealer) % 6 in 6-max
+    snap: dict[str, np.ndarray] = {}
+    for name in _PREMIUM_HANDS:
+        bucket = name_to_bucket.get(name)
+        if bucket is None:
+            continue
+        ssum = strategy_sum.get(infoset_key(utg_pos, (), bucket))
+        if ssum is None:
+            continue
+        total = ssum.sum()
+        if total > 0:
+            snap[name] = ssum / total
+    return snap
+
+
+def _print_premium_drift(prev: dict[str, np.ndarray] | None,
+                         cur: dict[str, np.ndarray]) -> None:
+    """Print premium-hand fold/call/raise/jam mix and max drift vs last checkpoint."""
+    if not cur:
+        return
+    print("[preflop_cfr] premium UTG-open mix "
+          "(fold/call/raise/jam) | drift:", flush=True)
+    for name in _PREMIUM_HANDS:
+        v = cur.get(name)
+        if v is None:
+            continue
+        fold = v[config.FOLD]
+        call = v[config.CHECK_CALL]
+        jam  = v[config.ALL_IN]
+        raise_ = max(0.0, 1.0 - fold - call - jam)
+        if prev and name in prev:
+            drift = float(np.abs(v - prev[name]).max())
+            drift_s = f"max|d|={drift:.3f}"
+        else:
+            drift_s = "  -  "
+        print(f"    {name:4s}  {fold:.2f}/{call:.2f}/{raise_:.2f}/{jam:.2f}"
+              f"   {drift_s}", flush=True)
 
 
 def _print_spot_check(strategy_sum: dict[int, np.ndarray], verbose: bool):
