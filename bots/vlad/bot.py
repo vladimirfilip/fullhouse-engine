@@ -41,6 +41,16 @@ def _envf(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return float(default)
 
+
+# ── Latency guard ───────────────────────────────────────────────────────────
+# The action timeout is 2 s on a 0.5-core box; a self-timeout auto-folds. Each
+# decide() sets a wall-clock deadline well under the cap, and the Monte-Carlo
+# loop (the only unbounded cost) stops once it's hit — degrading to a noisier
+# equity estimate instead of ever blowing the budget. Overridable for tuning.
+_TIME_BUDGET = _envf("VLAD_TIME_BUDGET", 1.5)
+_MC_MIN_ITERS = 64      # floor so a deadline-truncated rollout stays meaningful
+_DECIDE_DEADLINE: float | None = None   # absolute deadline (time.time()); per decide()
+
 # ── Encodings (must match deep_cfr_cpp/src/features.cpp) ─────────────────
 _CARD_IDX: dict[str, int] = {
     r + s: ri * 4 + si
@@ -59,11 +69,7 @@ _FOLD, _CHECK_CALL = 0, 1
 _0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN = 2, 3, 4, 5, 6, 7, 8
 
 # ── Decision-engine configuration ──────────────────────────────────────────
-# Preflop is handled by a hand-strength heuristic (see _preflop_decide).  The
-# tabular CFR preflop table is OFF: the shipped table is a 5k-iteration smoke
-# run that confidently jams trash (98s/J2s) — re-enable only after a full
-# retrain (see RETRAINING.md).
-_USE_PREFLOP_TABLE = False
+_USE_PREFLOP_TABLE = True
 
 # Postflop engine: "net" = trained GTO strategy net (balanced ranges), "mc" =
 # Monte-Carlo equity + pot-odds.  Toggle is read by _postflop_decide so the two
@@ -86,6 +92,50 @@ _RAISE_LADDER = [
     (_1_72X, lambda p: round(p * 1.72)),
     (_2X,    lambda p: p * 2),
 ]
+
+
+def _hero_position(gs: dict) -> tuple[int, int]:
+    """(hero_pos, n_in_game): hero's seat offset from the dealer and table size.
+
+    The frozen engine doesn't surface dealer_seat, so derive it from the SB
+    action: heads-up the dealer IS the SB; 3+-handed the SB sits one left of the
+    dealer. Single source of truth for every position-dependent computation
+    (feature vector, preflop info-set key, preflop heuristic).
+    """
+    seat      = gs["seat_to_act"]
+    al        = gs["action_log"]
+    n_in_game = max(len(gs["players"]), 1)
+    dealer    = 0
+    if al and al[0].get("action") == "small_blind":
+        sb_seat = al[0]["seat"]
+        dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
+    return (seat - dealer) % n_in_game, n_in_game
+
+
+def _in_position(gs: dict) -> bool:
+    """True if hero acts last among the still-live players this (postflop) street.
+
+    Postflop the betting order runs clockwise from the small blind (offset 1 from
+    the dealer) and the button (offset 0) acts last, so a player's "order rank" is
+    (offset - 1) mod n. Hero is in position when no live opponent has a higher
+    rank. Equity realises better in position (you see opponents act, can check
+    back, bluff, and control the pot), so the continue threshold is relaxed IP and
+    tightened OOP in _mc_postflop.
+    """
+    seat = gs["seat_to_act"]
+    hero_off, n = _hero_position(gs)
+    dealer = (seat - hero_off) % n
+
+    def rank(off: int) -> int:
+        return (off - 1) % n
+
+    hero_rank = rank(hero_off)
+    for p in gs["players"]:
+        if p["seat"] == seat or p.get("is_folded") or p.get("state") in ("folded", "busted"):
+            continue
+        if rank((p["seat"] - dealer) % n) > hero_rank:
+            return False
+    return True
 
 
 # ── Feature extraction (mirrors deep_cfr_cpp/src/features.cpp) ─────────────
@@ -209,16 +259,9 @@ def _build_feature_vector(gs: dict) -> np.ndarray:
         vec[52 + _CARD_IDX[card]] = 1.0
 
     # ── 3. Hero position relative to dealer [104:110] ───────────────────────
-    # Frozen engine doesn't surface dealer_seat, so derive from the SB action.
-    # Heads-up: dealer IS the SB. For 3+ players, SB is one left of dealer.
-    seat      = gs["seat_to_act"]
-    al        = gs["action_log"]
-    n_in_game = max(len(gs["players"]), 1)
-    dealer    = 0
-    if al and al[0].get("action") == "small_blind":
-        sb_seat = al[0]["seat"]
-        dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
-    hero_pos = (seat - dealer) % n_in_game
+    seat = gs["seat_to_act"]
+    al   = gs["action_log"]
+    hero_pos, n_in_game = _hero_position(gs)
     vec[104 + hero_pos] = 1.0
 
     # ── 4. Pot and stacks [110:117] ─────────────────────────────────────────
@@ -439,16 +482,9 @@ def _pf_amount_to_abstract(raise_to: int, pot: int,
 # -- mirrored: infoset_key (preflop_cfr/abstraction.py) --
 def _preflop_infoset_key(gs: dict) -> int:
     """Compute the preflop info-set hash for the current game state."""
-    al         = gs["action_log"]
-    seat       = gs["seat_to_act"]
-    n_in_game  = max(len(gs["players"]), 1)
-    dealer     = 0
-    if al and al[0].get("action") == "small_blind":
-        sb_seat = al[0]["seat"]
-        dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
-
-    hero_pos = (seat - dealer) % n_in_game
-    bucket   = _preflop_bucket(gs["your_cards"][0], gs["your_cards"][1])
+    al          = gs["action_log"]
+    hero_pos, _ = _hero_position(gs)
+    bucket      = _preflop_bucket(gs["your_cards"][0], gs["your_cards"][1])
 
     # Replay action log to build history (non-blind actions only)
     # Track pot/current_bet so we can translate raise amounts.
@@ -574,6 +610,11 @@ def _abstract_to_raw(action_idx: int, gs: dict) -> dict:
 # ── Shared decision helpers ────────────────────────────────────────────────
 
 
+def _legal_index(legal: list, action: int):
+    """Position of `action` within the legal list, or None if it isn't legal."""
+    return next((i for i, a in enumerate(legal) if a == action), None)
+
+
 def _mask_probs(full_probs: np.ndarray, legal: list) -> np.ndarray:
     """Slice full_probs to legal indices, clip negatives, normalize."""
     arr = np.maximum(
@@ -613,7 +654,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
     owed = gs["amount_owed"]
     if owed <= 0:
         blended = gto_arr.copy()
-        call_idx = next((i for i, a in enumerate(legal) if a == _CHECK_CALL), None)
+        call_idx = _legal_index(legal, _CHECK_CALL)
         bet_idxs = [i for i, a in enumerate(legal) if a not in (_FOLD, _CHECK_CALL)]
         if bet_shift > 0.0 and call_idx is not None and bet_idxs:
             move = min(bet_shift, float(blended[call_idx]))
@@ -635,8 +676,8 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
     pot_odds     = owed / (pot + owed)          # minimum equity to break even on a call
     equity_edge  = equity - pot_odds            # + = call is profitable; − = fold preferred
 
-    fold_idx = next((i for i, a in enumerate(legal) if a == _FOLD),       None)
-    call_idx = next((i for i, a in enumerate(legal) if a == _CHECK_CALL), None)
+    fold_idx = _legal_index(legal, _FOLD)
+    call_idx = _legal_index(legal, _CHECK_CALL)
 
     if fold_idx is None or call_idx is None:
         return legal[int(np.random.choice(len(legal), p=gto_arr))]
@@ -713,7 +754,92 @@ _CHEN_BASE  = {"A": 10.0, "K": 8.0, "Q": 7.0, "J": 6.0, "T": 5.0, "9": 4.5,
 _PREMIUM_3BET = {"AA", "KK", "QQ", "AKs", "AKo"}   # always 3-bet / 4-bet-jam core
 
 # Open-raise Chen thresholds by position; lower = wider.
+# Used only as a fallback (BB iso-raises, profile-driven widening) when a
+# position has no explicit chart range below.
 _OPEN_THRESH = {"UTG": 8.5, "MP": 7.5, "CO": 6.5, "BTN": 5.0, "SB": 6.0, "BB": 8.0}
+
+
+def _expand_range(tokens) -> frozenset:
+    """Expand poker range notation into a frozenset of canonical hand labels.
+
+    Labels match _preflop_context: pair "AA", suited "AKs", offsuit "AKo",
+    higher rank first.  Supported tokens (standard chart notation):
+        "AA"     exact pair
+        "TT+"    that pair and every higher pair (TT,JJ,QQ,KK,AA)
+        "AKs"    exact suited combo            "AKo"   exact offsuit combo
+        "ATs+"   fixed high card, lower card from the named rank up to one
+                 below the high card, suited   (ATs,AJs,AQs,AKs)
+        "AQo+"   same, offsuit                 (AQo,AKo)
+    """
+    out: set[str] = set()
+    for tok in tokens:
+        t = tok.strip()
+        plus = t.endswith("+")
+        if plus:
+            t = t[:-1]
+        suit = ""
+        if t and t[-1] in "so":
+            suit, t = t[-1], t[:-1]
+        a, b = t[0].upper(), t[1].upper()
+        ia, ib = _RANK_ORDER[a], _RANK_ORDER[b]
+        if ia < ib:                                   # normalise: high card first
+            ia, ib = ib, ia
+        if ia == ib:                                  # pair
+            top = 12 if plus else ia                  # 'A' index == 12
+            for r in range(ia, top + 1):
+                out.add(RANKS[r] * 2)
+        else:                                         # non-pair
+            top = ia - 1 if plus else ib              # vary lower card up to a-1
+            for r in range(ib, top + 1):
+                out.add(f"{RANKS[ia]}{RANKS[r]}{suit}")
+    return frozenset(out)
+
+
+# Chart-derived 6-max 100bb GTO ranges (open frequencies ~16% UTG → ~48% BTN),
+# approximated from standard free solver charts (RangeConverter / PokerCoaching).
+# These cover the high-frequency root nodes; deeper/short-stack spots fall back
+# to the Chen-formula logic below.
+_OPEN_RANGE = {
+    "UTG": _expand_range([
+        "22+",
+        "A2s+", "K9s+", "Q9s+", "J9s+", "T8s+", "97s+", "86s+", "75s+", "65s", "54s",
+        "ATo+", "KJo+", "QJo",
+    ]),
+    "MP": _expand_range([
+        "22+",
+        "A2s+", "K8s+", "Q9s+", "J8s+", "T8s+", "97s+", "86s+", "75s+", "64s+", "54s",
+        "A9o+", "KTo+", "QTo+", "JTo",
+    ]),
+    "CO": _expand_range([
+        "22+",
+        "A2s+", "K6s+", "Q8s+", "J8s+", "T7s+", "96s+", "86s+", "75s+", "64s+", "54s", "53s",
+        "A8o+", "KTo+", "QTo+", "JTo", "T9o",
+    ]),
+    "BTN": _expand_range([
+        "22+",
+        "A2s+", "K2s+", "Q4s+", "J6s+", "T6s+", "96s+", "85s+", "74s+", "63s+", "53s+", "43s",
+        "A2o+", "K8o+", "Q9o+", "J9o+", "T8o+", "98o", "87o",
+    ]),
+    "SB": _expand_range([                              # raise-first-in (limp handled separately)
+        "22+",
+        "A2s+", "K5s+", "Q6s+", "J7s+", "T7s+", "96s+", "85s+", "74s+", "64s+", "53s+",
+        "A7o+", "K9o+", "Q9o+", "J9o+", "T9o", "98o",
+    ]),
+}
+
+# 3-bet ranges when facing a single open (value core + position-appropriate
+# bluffs).  Premium hands in _PREMIUM_3BET always re-raise on top of these.
+_THREEBET_RANGE = {
+    "UTG": _expand_range(["QQ+", "AKs", "AKo", "AQs", "A5s", "A4s"]),
+    "MP":  _expand_range(["JJ+", "AQs+", "AKo", "AJs", "KQs", "A5s", "A4s"]),
+    "CO":  _expand_range(["TT+", "AJs+", "AQo+", "KQs", "KJs", "A5s", "A4s", "A3s", "76s"]),
+    "BTN": _expand_range(["99+", "ATs+", "AQo+", "KTs+", "QJs", "JTs",
+                          "A5s", "A4s", "A3s", "A2s", "76s", "65s"]),
+    "SB":  _expand_range(["TT+", "AJs+", "AKo", "AQo", "KQs", "KJs",
+                          "A5s", "A4s", "A3s", "76s", "65s"]),
+    "BB":  _expand_range(["99+", "AJs+", "AQo+", "KQs", "KJs", "QJs",
+                          "A5s", "A4s", "A3s", "A2s", "76s", "65s", "54s"]),
+}
 
 
 def _chen_score(hi: str, lo: str, suited: bool) -> float:
@@ -758,14 +884,8 @@ def _preflop_context(gs: dict) -> dict:
         hi, lo = r2, r1
     label = f"{hi}{lo}" + ("s" if suited and hi != lo else "" if hi == lo else "o")
 
-    seat = gs["seat_to_act"]
-    al   = gs["action_log"]
-    n    = max(len(gs["players"]), 1)
-    dealer = 0
-    if al and al[0].get("action") == "small_blind":
-        sb = al[0]["seat"]
-        dealer = sb if n == 2 else (sb - 1) % n
-    off = (seat - dealer) % n
+    al     = gs["action_log"]
+    off, n = _hero_position(gs)
 
     n_raises = sum(1 for e in al if e.get("action") in ("raise", "all_in"))
     limpers  = sum(1 for e in al if e.get("action") == "call") if n_raises == 0 else 0
@@ -777,6 +897,24 @@ def _preflop_context(gs: dict) -> dict:
         "pos": _pos_category(off, n), "n": n,
         "n_raises": n_raises, "limpers": limpers, "eff_bb": eff_bb,
     }
+
+
+def _preflop_callers(gs: dict) -> int:
+    """Count cold-calls of a raise so far this (preflop) street.
+
+    A caller between us and a re-raiser means a multiway pot with a stronger
+    combined range, so we should commit a deep stack more cautiously (see
+    _preflop_decide's facing-a-re-raise logic).
+    """
+    seen_raise = False
+    callers = 0
+    for e in gs.get("action_log", []):
+        act = e.get("action")
+        if act in ("raise", "all_in"):
+            seen_raise = True
+        elif act == "call" and seen_raise:
+            callers += 1
+    return callers
 
 
 def _max_opponent_stack(gs: dict) -> int:
@@ -828,7 +966,14 @@ def _preflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
 
     # ── Unopened pot (no prior raise) ──────────────────────────────────────
     if ctx["n_raises"] == 0:
-        if chen >= open_thr:
+        if pos in _OPEN_RANGE:
+            should_open = label in _OPEN_RANGE[pos]
+            # vs passive nits, steal a touch wider; vs maniacs hold to the chart.
+            if not should_open and nit > 0 and maniac == 0:
+                should_open = chen >= (open_thr - 1.0)
+        else:
+            should_open = chen >= open_thr      # BB iso-raise / fallback
+        if should_open:
             to = 3 * _BIG_BLIND + ctx["limpers"] * _BIG_BLIND      # ~3bb + 1bb/limper
             return _raise_to_amount(gs, to)
         if can_check:
@@ -845,15 +990,42 @@ def _preflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
     facing_3bet = ctx["n_raises"] >= 2
     cur = gs["current_bet"]
 
-    if label in _PREMIUM_3BET or chen >= (15.0 if facing_3bet else 13.0):
-        # 3-bet/4-bet for value.
-        if facing_3bet:
-            # Jam all premium hands vs a 3-bet: no fold equity for a 4-bet-fold
-            # and opponents' 3-bet ranges are strong enough to call jams with QQ+/AK.
-            return {"action": "all_in"}
+    # Chart-driven re-raise: premium core always; otherwise the position's
+    # 3-bet range (only when facing a single open — vs a 3-bet we 4-bet the
+    # premium core only).
+    threebet_set = _THREEBET_RANGE.get(pos, _PREMIUM_3BET)
+    want_reraise = label in _PREMIUM_3BET or (not facing_3bet and label in threebet_set)
+
+    if want_reraise:
+        # Shallow (≤ 35 bb eff): we're committed — jam the premium/3-bet core.
         if eff_bb <= 35:
             return {"action": "all_in"}
-        return _raise_to_amount(gs, cur * 3)
+
+        # Deep, facing a single open: 3-bet (value + chart bluffs) to a size.
+        if not facing_3bet:
+            return _raise_to_amount(gs, cur * 3)
+
+        # Deep, facing a RE-raise of our line (only premiums reach here). Blanket-
+        # jamming 100 bb is the biggest leak: value-heavy 4-bet ranges crush QQ/AK,
+        # and a cold-caller in between makes it worse. Commit by hand strength.
+        callers   = _preflop_callers(gs)
+        four_bet  = ctx["n_raises"] >= 3        # we 3-bet and got 4-bet (or more)
+
+        if four_bet:
+            # vs a 4-bet at depth only the very top stacks off.
+            if label in ("AA", "KK"):
+                return {"action": "all_in"}
+            return {"action": "fold"}           # QQ/AK dominated by 4-bet value ranges
+
+        # Facing a single 3-bet while deep.
+        if label in ("AA", "KK"):
+            return _raise_to_amount(gs, round(cur * 2.3))   # 4-bet value, non-committing
+        if label == "QQ" and callers >= 1:
+            return {"action": "fold"}           # multiway 3-bet pot: QQ is dominated
+        # QQ / AKs / AKo: flat to realize equity rather than stack off 100 bb.
+        if owed <= pot * 0.90:
+            return {"action": "call"}
+        return {"action": "fold"}
 
     if not facing_3bet:
         # Flat strong hands and set-mine speculative hands at the right price.
@@ -984,10 +1156,8 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
     owed    = gs["amount_owed"]
     pot     = max(1, gs["pot"])
     stack   = gs["your_stack"]
-    my_bet  = gs["your_bet_this_street"]
     cur     = gs["current_bet"]
     min_r   = gs["min_raise_to"]
-    all_tot = my_bet + stack
     texture = _board_texture(gs.get("community_cards", []))
     n_active = sum(1 for p in gs["players"]
                    if p.get("state") == "active" and p["seat"] != gs["seat_to_act"])
@@ -1009,9 +1179,7 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
         # c-bet for fold equity rather than meekly checking (Module D1, MC path).
         if owed == 0 and _should_cbet_bluff(gs, equity, profile_counts,
                                             texture, n_active):
-            target = max(round(pot * 0.5), min_r)
-            return {"action": "all_in"} if target >= all_tot \
-                else {"action": "raise", "amount": target}
+            return _raise_to_amount(gs, round(pot * 0.5))
         return {"action": "check"} if owed == 0 else {"action": "fold"}
 
     # Decide whether to raise/bet vs call/check.
@@ -1042,11 +1210,7 @@ def _mc_postflop(gs: dict, equity: float, profile_counts: tuple) -> dict:
     if maniac > 0 and owed > 0:
         bet_frac += 0.15          # re-raise big vs maniacs
 
-    target = cur + max(round(pot * bet_frac), min_r - cur)
-    target = max(target, min_r)
-    if target >= all_tot:
-        return {"action": "all_in"}
-    return {"action": "raise", "amount": target}
+    return _raise_to_amount(gs, cur + max(round(pot * bet_frac), min_r - cur))
 
 
 def _board_features(board: list) -> dict:
@@ -1294,14 +1458,16 @@ def _anti_punt(action: dict, gs: dict, equity: float, profiles: dict) -> dict:
     return action
 
 
-def _postflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
+def _postflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0),
+                     profiles: dict | None = None) -> dict:
     """Route the postflop decision through the configured engine, risk gate, and
     the anti-punt override layer."""
-    equity = _run_mc(gs, max_iters=1_200)
+    if profiles is None:
+        my_bot_id = next((p["bot_id"] for p in gs["players"]
+                          if p["seat"] == gs["seat_to_act"]), None)
+        profiles = _build_opponent_profiles(gs.get("match_action_log", []), my_bot_id)
 
-    my_bot_id = next((p["bot_id"] for p in gs["players"]
-                      if p["seat"] == gs["seat_to_act"]), None)
-    profiles = _build_opponent_profiles(gs.get("match_action_log", []), my_bot_id)
+    equity = _run_mc(gs, max_iters=1_200, profiles=profiles)
 
     if _POSTFLOP_ENGINE == "mc" or _GTO_LAYERS is None:
         action = _mc_postflop(gs, equity, profile_counts)
@@ -1415,10 +1581,15 @@ def monte_carlo_equity(
     time_limit: float = 0.5,
     max_iters: int | None = None,
     opp_floors: list | None = None,
+    deadline: float | None = None,
 ) -> float:
     """Monte-Carlo equity vs `num_opponents`. If `opp_floors` is given (one
     strength percentile per opponent), each opponent's hole cards are rejection-
     sampled to sit at/above that floor — range-conditioned equity (Module B).
+
+    `deadline` (a time.time() value) is a hard wall-clock cap from the latency
+    guard: once past it we stop early (keeping ≥ _MC_MIN_ITERS samples so the
+    estimate stays usable) rather than risk the 2 s action timeout.
     """
     start = time.time()
     wins, iters = 0, 0
@@ -1427,6 +1598,8 @@ def monte_carlo_equity(
     floors = opp_floors if opp_floors else None
     while (max_iters is None and time.time() - start < time_limit) or \
           (max_iters is not None and iters < max_iters):
+        if deadline is not None and iters >= _MC_MIN_ITERS and time.time() > deadline:
+            break
         random.shuffle(remaining_cards)
         if floors is None:
             opp_hands = [remaining_cards[i * 2: i * 2 + 2] for i in range(num_opponents)]
@@ -1455,36 +1628,6 @@ def monte_carlo_equity(
             wins   += 1 / (n_tied + 1)
         iters += 1
     return wins / max(iters, 1)
-
-
-def choose_action(mc_equity, pot, amount_owed, already_bet, min_raise_to, your_stack, n_players,
-                  maniac_count=0, calling_station_count=0, nit_count=0):
-    if maniac_count > 0:
-        buffer = 0.02
-    elif n_players == 2:
-        buffer = 0.10
-    elif n_players <= 4:
-        buffer = 0.15
-    else:
-        buffer = 0.30
-    buffer = max(0.0, buffer - 0.05 * nit_count)
-    required_equity = amount_owed / (pot + amount_owed) if amount_owed > 0 else 0
-
-    if mc_equity < required_equity + buffer:
-        return {"action": "check"} if amount_owed == 0 else {"action": "fold"}
-
-    raise_threshold = 0.60 if (calling_station_count > 0 and maniac_count == 0) else 0.80
-    if mc_equity > raise_threshold or mc_equity > required_equity + buffer + 0.15:
-        all_chips    = already_bet + your_stack
-        if all_chips < pot * 2:
-            return {"action": "all_in"}
-        raise_amount = max(min_raise_to, already_bet + amount_owed)
-        raise_amount = min(raise_amount, all_chips)
-        if raise_amount == all_chips:
-            return {"action": "all_in"}
-        return _jitter_raise(raise_amount, min_raise_to, all_chips)
-
-    return {"action": "check"} if amount_owed == 0 else {"action": "call"}
 
 
 # ── Opponent modeling: street reconstruction (Module A1) ───────────────────
@@ -1780,18 +1923,14 @@ def _classify_opponent(counters: dict) -> tuple[str, float]:
 
 
 def _opponent_profile_counts(
-    match_log: list, players: list, my_seat: int
+    profiles: dict, players: list, my_seat: int
 ) -> tuple[int, int, int]:
     """Return (maniac_count, calling_station_count, nit_count) among active opponents.
 
-    Now backed by the street-aware leak profiler (Modules A2/A3): per-bot_id
-    archetype classification with empirical-Bayes confidence, replacing the old
-    raw action-type ratios. Only reads with confidence ≥ _PROFILE_ACT_CONF count,
-    so sparse/uncertain opponents fall through to neutral (no nudge).
+    `profiles` is the prebuilt per-bot_id leak table from the street-aware
+    profiler (Modules A2/A3). Only reads with confidence ≥ _PROFILE_ACT_CONF
+    count, so sparse/uncertain opponents fall through to neutral (no nudge).
     """
-    my_bot_id = next((p["bot_id"] for p in players if p["seat"] == my_seat), None)
-    profiles = _build_opponent_profiles(match_log, my_bot_id)
-
     maniac = station = nit = 0
     for p in players:
         if p["seat"] == my_seat or p["state"] in ("folded", "busted"):
@@ -1812,7 +1951,10 @@ def _opponent_profile_counts(
 
 
 def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = None,
-            range_conditioned: bool = True) -> float:
+            range_conditioned: bool = True, profiles: dict | None = None,
+            deadline: float | None = None) -> float:
+    if deadline is None:
+        deadline = _DECIDE_DEADLINE
     my_cards    = list(map(Card, game_state["your_cards"]))
     board_cards = list(map(Card, game_state["community_cards"]))
     rest_cards  = [c for c in ALL_CARDS if c not in my_cards and c not in board_cards]
@@ -1826,10 +1968,11 @@ def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = N
     # GTO path, MC path, and fallback all share it.
     opp_floors = None
     if range_conditioned and active_opps:
-        my_bot_id = next((p["bot_id"] for p in game_state["players"]
-                          if p["seat"] == my_seat), None)
-        profiles = _build_opponent_profiles(
-            game_state.get("match_action_log", []), my_bot_id)
+        if profiles is None:
+            my_bot_id = next((p["bot_id"] for p in game_state["players"]
+                              if p["seat"] == my_seat), None)
+            profiles = _build_opponent_profiles(
+                game_state.get("match_action_log", []), my_bot_id)
         street = game_state.get("street", "flop")
         # Action-conditioned bump (cfr_equity_v28 #4): aggression shown THIS hand
         # (3-bets+, postflop barrels, big bets) means a stronger live range than
@@ -1845,7 +1988,8 @@ def _run_mc(game_state: dict, time_limit: float = 0.5, max_iters: int | None = N
             opp_floors.append(min(0.92, floor))
 
     return monte_carlo_equity(my_cards, board_cards, rest_cards, n_opp,
-                              time_limit, max_iters, opp_floors=opp_floors)
+                              time_limit, max_iters, opp_floors=opp_floors,
+                              deadline=deadline)
 
 
 # ── Main entry point ───────────────────────────────────────────────────────
@@ -1869,6 +2013,10 @@ def decide(game_state: dict) -> dict:
     if game_state.get("type") == "warmup":
         return {"action": "check"}
 
+    # Latency guard: hard wall-clock cap for this action, read by the MC loop.
+    global _DECIDE_DEADLINE
+    _DECIDE_DEADLINE = time.time() + _TIME_BUDGET
+
     # Seed both RNGs from game state so replays with the same match seed are identical.
     _seed = _action_seed(game_state)
     random.seed(_seed)
@@ -1876,18 +2024,24 @@ def decide(game_state: dict) -> dict:
 
     my_seat = game_state["seat_to_act"]
 
-    # Opponent profiling drives both preflop range nudges and postflop sizing.
-    profile_counts = _opponent_profile_counts(
-        game_state.get("match_action_log", []), game_state["players"], my_seat
-    )
+    # Build opponent profiles once per decision; the same dict feeds the preflop
+    # range nudges, postflop sizing, range-conditioned equity, and the exploit /
+    # anti-punt layers (previously rebuilt 3× per postflop action).
+    my_bot_id = next((p["bot_id"] for p in game_state["players"]
+                      if p["seat"] == my_seat), None)
+    profiles = _build_opponent_profiles(
+        game_state.get("match_action_log", []), my_bot_id)
+    profile_counts = _opponent_profile_counts(profiles, game_state["players"], my_seat)
 
     try:
         if game_state.get("street", "preflop") == "preflop":
-            # Heuristic preflop policy (the trained table is disabled — it shipped
-            # a smoke-run that jams trash; see RETRAINING.md).
+            # Chart-derived heuristic preflop policy. The trained CFR table is
+            # left loaded but unused: at 400k traversals over ~4.9M info sets it
+            # never converged and open-jams premiums at 100bb. Re-enable via
+            # _preflop_table_decide() once the table is retrained to convergence.
             return _preflop_decide(game_state, profile_counts)
         # Postflop: net or MC engine, behind the equity risk gate.
-        return _postflop_decide(game_state, profile_counts)
+        return _postflop_decide(game_state, profile_counts, profiles)
     except Exception:
         # Last-ditch safe fallback: never crash → never auto-fold from an error.
         owed = game_state.get("amount_owed", 0)
