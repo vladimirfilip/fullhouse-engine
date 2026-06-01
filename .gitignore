@@ -36,3 +36,6 @@ bots/vlad.zip
 .pytest_cache/
 
 tournament_logs/
+
+# vlad A/B + eval scratch (regenerable)
+_ab/

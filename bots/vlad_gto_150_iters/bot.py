@@ -343,7 +343,7 @@ def _numpy_forward(
 
 DATA_DIR   = os.environ.get("BOT_DATA_DIR",
              os.path.join(os.path.dirname(__file__), "data"))
-_MODEL_PATH = os.path.join(DATA_DIR, "better_gto", "gto_strategy.npz")
+_MODEL_PATH = os.path.join(DATA_DIR, "gto_strategy.npz")
 
 _GTO_LAYERS: list[tuple[np.ndarray, np.ndarray]] | None = None
 

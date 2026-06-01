@@ -38,6 +38,22 @@ from sandbox.match import run_match  # noqa: E402
 BOTS_DIR = ROOT / "bots"
 LOGS_DIR = ROOT / "tournament_logs"
 TABLE_SIZE = 6
+
+# Named opponent fields, selectable with --field. Kept in sync with the same
+# presets in tools/ab_tournament.py.
+FIELDS = {
+    # Top 12 of the current pool: the distinct strong archetypes that ranked
+    # high in BOTH finished full-field (86-bot) runs. The near-duplicate
+    # neel_v6_sweep_* variants (which swap ranks by variance) are collapsed to
+    # the single best sweep present in both runs; freed slots go to the next
+    # stable distinct bots.
+    "top12": [
+        "neel_v6_sweep_002", "Pav1602_skantbot4", "neel_v6_sweep_004",
+        "neel_v2_harmonic", "neel_v5_partition", "neel_range_tracker",
+        "neel_v2_riskgate", "cfr_equity_v28", "neel_v3_gemini",
+        "neel_v2", "neel_robust_hybrid", "saroopjagdev_mybot",
+    ],
+}
 DEFAULT_ROUNDS = 3
 DEFAULT_HANDS = 400
 DEFAULT_WORKERS = os.cpu_count() or 4
@@ -281,6 +297,10 @@ def main():
         help="Restrict to these bot names (default: all)",
     )
     parser.add_argument(
+        "--field", choices=list(FIELDS),
+        help="Use a named opponent field preset (combines with --bots)",
+    )
+    parser.add_argument(
         "--rounds", type=int, default=DEFAULT_ROUNDS,
         help="Number of Swiss rounds",
     )
@@ -302,9 +322,12 @@ def main():
     )
     args = parser.parse_args()
 
-    bots = _discover_bots(
-        args.bots_dir, include=set(args.bots) if args.bots else None
-    )
+    include = None
+    if args.field or args.bots:
+        include = set(args.bots or [])
+        if args.field:
+            include |= set(FIELDS[args.field])
+    bots = _discover_bots(args.bots_dir, include=include)
     if len(bots) < 2:
         sys.exit(
             f"ERROR: Need at least 2 bots in {args.bots_dir}, found {len(bots)}"
