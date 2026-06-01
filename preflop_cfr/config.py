@@ -32,7 +32,14 @@ N_ACTIONS     = 9
 # ~4.9M info sets (≈0.08 visits/set after 400k traversals) and never converged.
 PREFLOP_ACTIONS = [FOLD, CHECK_CALL, BET_FULL_POT, ALL_IN]
 
-MAX_RAISES_PREFLOP = 3
+# Cap on non-jam raises in the preflop tree.  2 = open + 3-bet with a sized raise;
+# 4-bets and beyond are still reachable via ALL_IN (always legal), so 4-bet-jam
+# lines survive.  Dropping from 3→2 prunes the deepest, rarest re-raise subtrees,
+# which (a) shrinks the reachable info-set count so the visit budget converges
+# faster and (b) removes the most expensive multiway all-in equity leaves.  This
+# is the one knob here that trades strategy resolution (non-jam 4-bet sizing) for
+# convergence speed — raise back to 3 if the wall-clock budget allows.
+MAX_RAISES_PREFLOP = 2
 
 # ── Training ───────────────────────────────────────────────────────────────────
 # With the coarse 4-action / 2-raise tree the reachable info-set count drops to
@@ -41,7 +48,12 @@ MAX_RAISES_PREFLOP = 3
 # checkpoint — visits/set histogram + premium-hand strategy drift — NOT by raw
 # iteration count.  Stop when TARGET_VISITS_PER_SET is broadly met and the
 # premium-hand drift between checkpoints has flattened.
-ITERATIONS         = 50_000_000  # ES-MCCFR game traversals (convergence target)
+# Upper bound on traversals — a *safety ceiling*, not the real stop condition.
+# The convergence gate below stops the run as soon as the premium-hand strategy
+# has stopped drifting, which under CFR+ + the coarse tree happens well inside
+# this ceiling (≈7M traversals to hit TARGET_VISITS_PER_SET; ~7h at ~300 it/s on
+# 8 workers).  The ceiling just guarantees termination if the gate never trips.
+ITERATIONS         = 20_000_000  # ES-MCCFR traversal ceiling
 QUICK_ITERATIONS   = 5_000       # smoke-test run (--quick flag)
 CHECKPOINT_EVERY   = 1_000_000
 PRUNE_MIN_VISITS   = 10        # drop info sets visited < N times at export
@@ -49,6 +61,15 @@ PRUNE_MIN_VISITS   = 10        # drop info sets visited < N times at export
 # Once most info sets clear this and the premium-hand drift has flattened across
 # consecutive checkpoints, the table is effectively converged.
 TARGET_VISITS_PER_SET = 1_000
+
+# ── Early-stop convergence gate ────────────────────────────────────────────────
+# Stop training once the premium UTG-open strategy mix (AA/KK/.../AKo) changes by
+# less than CONVERGENCE_DRIFT_EPS (max |Δ probability|) between consecutive
+# checkpoints, for CONVERGENCE_PATIENCE checkpoints in a row.  This is what
+# actually ends the run — so the budget is spent reaching convergence, not
+# chasing rare info sets long after the strategy has settled.
+CONVERGENCE_DRIFT_EPS = 0.01
+CONVERGENCE_PATIENCE  = 3
 # Parallel mode: iterations between cross-worker merges. Smaller = closer to
 # true sequential CFR (less worker divergence) but more broadcast overhead.
 SYNC_EVERY         = 100_000
@@ -62,7 +83,12 @@ MEM_BUDGET_GB      = float(os.environ.get("PREFLOP_MEM_BUDGET_GB", "6"))
 
 # ── Equity tables ──────────────────────────────────────────────────────────────
 HU_EQUITY_BOARDS    = 2_000    # MC boards for 169×169 HU table build
-MULTIWAY_MC_BOARDS  = 400      # MC boards per multiway leaf rollout
+# MC boards per multiway (3+-player) leaf rollout.  Lowered 400→250: these leaves
+# are the dominant cost, and the result is cached per suit-isomorphic matchup, so
+# 250 boards (±~3% per-leaf stderr) is enough resolution for the 169-bucket
+# abstraction.  Don't drop below ~200 — the frozen cache value bakes the MC noise
+# into the equilibrium, so too few boards biases the solution.
+MULTIWAY_MC_BOARDS  = 250      # MC boards per multiway leaf rollout
 
 # ── Export ─────────────────────────────────────────────────────────────────────
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

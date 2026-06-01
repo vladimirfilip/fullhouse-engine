@@ -44,13 +44,22 @@ def _rollout_equity(
     remaining = [c for c in ALL_CARDS if str(c) not in known]
     need = 5 - len(known_board)
 
-    # Hoist hot-loop attribute lookups; draw boards with random.sample (k draws)
-    # instead of shuffling the whole 48-card deck (~47 swaps) per board.
-    sample   = random.sample
+    # Board sampling dominates this function (≈60% of total CFR runtime in the
+    # profile), and random.sample's per-draw overhead (isinstance + _randbelow)
+    # was the bulk of it.  Replace it with an inline partial Fisher–Yates: each
+    # board swaps the first `need` slots of `remaining` with a random later slot
+    # using a single random()*range multiply per card.  `remaining` is a private
+    # throwaway list, so we shuffle it in place and never copy — a permuted prefix
+    # is still a uniform draw, so successive boards stay correctly distributed.
+    rnd      = random.random
     evaluate = eval7.evaluate
+    m        = len(remaining)
     tally    = [0.0] * n
     for _ in range(n_boards):
-        board  = known_board + sample(remaining, need)
+        for i in range(need):
+            j = i + int(rnd() * (m - i))
+            remaining[i], remaining[j] = remaining[j], remaining[i]
+        board  = known_board + remaining[:need]
         scores = [evaluate(h + board) for h in hands]
         best   = max(scores)
         nwin   = scores.count(best)

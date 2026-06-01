@@ -213,6 +213,7 @@ def train(
                                                             checkpoint_every)
     next_ckpt = (iter_done // checkpoint_every + 1) * checkpoint_every
     prev_premium: dict[str, np.ndarray] | None = None
+    stable_ckpts = 0   # consecutive checkpoints with premium drift < eps
     t0 = time.time()
 
     try:
@@ -255,13 +256,39 @@ def train(
             if iter_done >= next_ckpt or iter_done >= total_iters:
                 save_checkpoint(regret_sum, strategy_sum, visit_sum, iter_done)
                 next_ckpt += checkpoint_every
+
+                # Convergence gate (runs regardless of verbosity): track how much
+                # the premium UTG-open mix has moved since the last checkpoint.
+                cur_premium = _premium_snapshot(strategy_sum)
+                drift = _max_premium_drift(prev_premium, cur_premium)
+
                 if verbose:
                     print(f"[preflop_cfr] Checkpoint saved at iter {iter_done}.",
                           flush=True)
                     _visit_histogram(visit_sum)
-                    cur_premium = _premium_snapshot(strategy_sum)
                     _print_premium_drift(prev_premium, cur_premium)
-                    prev_premium = cur_premium
+
+                prev_premium = cur_premium
+
+                if drift is not None and drift < config.CONVERGENCE_DRIFT_EPS:
+                    stable_ckpts += 1
+                    if verbose:
+                        print(f"[preflop_cfr] premium drift {drift:.4f} < eps "
+                              f"{config.CONVERGENCE_DRIFT_EPS} "
+                              f"({stable_ckpts}/{config.CONVERGENCE_PATIENCE})",
+                              flush=True)
+                    if stable_ckpts >= config.CONVERGENCE_PATIENCE:
+                        print(f"[preflop_cfr] Converged: premium drift below "
+                              f"{config.CONVERGENCE_DRIFT_EPS} for "
+                              f"{stable_ckpts} consecutive checkpoints at iter "
+                              f"{iter_done}. Stopping early.", flush=True)
+                        break
+                else:
+                    if drift is not None and verbose:
+                        print(f"[preflop_cfr] premium drift {drift:.4f} "
+                              f"(>= eps {config.CONVERGENCE_DRIFT_EPS}); "
+                              f"streak reset", flush=True)
+                    stable_ckpts = 0
     finally:
         if pool is not None:
             pool.close()
@@ -344,6 +371,31 @@ def _premium_snapshot(strategy_sum: dict[int, np.ndarray]) -> dict[str, np.ndarr
     return snap
 
 
+def _max_premium_drift(prev: dict[str, np.ndarray] | None,
+                       cur: dict[str, np.ndarray]) -> float | None:
+    """Largest |Δ probability| across all premium hands vs the last checkpoint.
+
+    Returns None (don't gate) until both snapshots contain every premium hand —
+    early on, some premium info sets may not have been visited yet, and we must
+    not declare convergence before the strategy they track even exists.
+    """
+    if not prev or not cur:
+        return None
+    worst = 0.0
+    seen = 0
+    for name in _PREMIUM_HANDS:
+        a, b = cur.get(name), prev.get(name)
+        if a is None or b is None:
+            continue
+        d = float(np.abs(a - b).max())
+        if d > worst:
+            worst = d
+        seen += 1
+    if seen < len(_PREMIUM_HANDS):
+        return None
+    return worst
+
+
 def _print_premium_drift(prev: dict[str, np.ndarray] | None,
                          cur: dict[str, np.ndarray]) -> None:
     """Print premium-hand fold/call/raise/jam mix and max drift vs last checkpoint."""
@@ -410,8 +462,14 @@ if __name__ == "__main__":
                         help=f"Smoke test ({config.QUICK_ITERATIONS} iters)")
     parser.add_argument("--iters",   type=int, default=None,
                         help="Override total iterations")
-    parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 1)),
-                        help="Parallel worker processes (default: CPU count)")
+    parser.add_argument("--workers", type=int,
+                        default=max(1, (os.cpu_count() or 2) // 2),
+                        help="Parallel worker processes. Default ~ physical core "
+                             "count (logical/2): measured throughput scales well "
+                             "to ~physical cores, then flattens (the equity work "
+                             "is compute-bound, so hyperthreads add little and "
+                             "each extra process duplicates the equity cache). "
+                             "Override for a different box.")
     parser.add_argument("--sync",    type=int, default=config.SYNC_EVERY,
                         help="Iterations between cross-worker merges (parallel)")
     parser.add_argument("--resume",  action="store_true",
