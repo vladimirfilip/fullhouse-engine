@@ -24,6 +24,7 @@ deep_cfr_cpp/build/
 
 # Trained model weights — kept local, not pushed
 *.npz
+!preflop_cfr/hu_equity_table.npz
 
 # Local backup / submission zips
 bots/vlad - Copy/

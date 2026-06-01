@@ -115,11 +115,17 @@ train-quick:
 	$(VPY) -m deep_cfr.train --quick
 
 # ── Preflop tabular CFR (pure Python + eval7, no C++ required) ───────────────
+# RAM budget for the live CFR tables. Left unset here so it defers to
+# config.MEM_BUDGET_GB ($PREFLOP_MEM_BUDGET_GB env var, default 6). Override per
+# run with `make train-preflop MEM_BUDGET_GB=40`.
+MEM_BUDGET_GB ?=
+PREFLOP_MEM_FLAG := $(if $(MEM_BUDGET_GB),--mem-budget-gb $(MEM_BUDGET_GB),)
+
 train-preflop:
-	$(VPY) -m preflop_cfr.train --mem-budget-gb 10 >> train.log 2>&1
+	$(VPY) -m preflop_cfr.train $(PREFLOP_MEM_FLAG) >> train.log 2>&1
 
 train-preflop-quick:
-	$(VPY) -m preflop_cfr.train --quick --mem-budget-gb 10
+	$(VPY) -m preflop_cfr.train --quick $(PREFLOP_MEM_FLAG)
 
 # ── Engine targets (frozen) ──────────────────────────────────────────────────
 demo:

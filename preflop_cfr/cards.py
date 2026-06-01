@@ -48,15 +48,16 @@ def hand_to_bucket(c1, c2) -> int:
         # pair: AA→0, KK→1, ... 22→12
         return 12 - hi
 
-    # non-pair: enumerate high-rank-major
-    # number of non-pair combos with high rank > lo rank, high rank = hi:
-    #   pairs idx 0..12
-    #   suited: (hi, lo) for hi > lo → index = 13 + (12-hi)*hi//2 + ... computed directly
-    # Simpler: count all (h,l) pairs with h>l in rank order, h=12 down to h=1.
-    # Position within suited/offsuit block: hi_from_top = 12-hi (0=A, 1=K …)
-    # combos per hi rank: hi combos (lo can be 0..hi-1)
-    # sum_{r=hi+1}^{12} r = (12*(12+1)//2) - (hi*(hi+1)//2) = 78 - hi*(hi+1)//2
-    offset = 78 - hi * (hi + 1) // 2 + lo  # 0-based within the block
+    # non-pair: enumerate high-rank-major, and within each hi block lo DESCENDING
+    # (AKs=13, AQs=14, …, A2s=24, KQs=25, …) to match _build_bucket_info /
+    # BUCKET_INFO and the module docstring.  The two encodings MUST agree: the HU
+    # equity table is built indexed by BUCKET_INFO but queried via this function,
+    # so any disagreement returns the wrong cell.
+    #
+    # block start = number of non-pair combos with high rank > hi
+    #   sum_{r=hi+1}^{12} r = (12*(12+1)//2) - (hi*(hi+1)//2) = 78 - hi*(hi+1)//2
+    # position within the block, lo descending = (hi-1) - lo
+    offset = (78 - hi * (hi + 1) // 2) + (hi - 1 - lo)  # 0-based within the block
     if suited:
         return 13 + offset
     else:
@@ -110,15 +111,40 @@ def deal_hands(deck: list[eval7.Card], n: int) -> list[list[eval7.Card]]:
 
 def canonical_handset_key(hands: list[list[eval7.Card]]) -> tuple:
     """
-    Return a suit-isomorphic canonical key for a set of concrete hole-card pairs.
-    Used to cache multiway equity rollout results across suit permutations.
+    Suit-isomorphism-invariant cache key for a list of concrete hole-card pairs,
+    preserving the input hand ORDER.
+
+    Two handsets share a key iff one is a global suit relabeling of the other
+    with the hands in the same order.  Order is preserved on purpose: the cached
+    equity vector is in input-hand order, so reusing it across handsets that
+    share a key assigns each player's equity to the right seat.  (A previous
+    version keyed on a *sorted* tuple of (hi, lo, suited) triples, which both
+    dropped the hand→equity correspondence — returning per-seat equities in the
+    wrong order on a cache hit — and discarded cross-hand suit coordination.)
+
+    Suits are relabeled with a single global first-appearance map, so shared
+    suits across hands (which drive flush/removal effects) yield a distinct key
+    from non-shared ones, while a pure relabeling of all four suits collapses to
+    the same key.
     """
-    # Represent each hand as a sorted (rank, rank, suited) triple.
-    triples = []
+    relabel: dict[int, int] = {}
+    out: list[tuple] = []
     for h in hands:
-        s1, s2 = str(h[0]), str(h[1])
-        r1, r2 = _CARD_RANK[s1], _CARD_RANK[s2]
-        suited = (_CARD_SUIT[s1] == _CARD_SUIT[s2])
-        hi, lo = (r1, r2) if r1 >= r2 else (r2, r1)
-        triples.append((hi, lo, suited))
-    return tuple(sorted(triples))
+        # Order the two cards by rank desc (suit-permutation invariant for
+        # non-pairs since rank dominates); the global first-appearance relabel
+        # below handles the suit labels.
+        cards = sorted(
+            ((_CARD_RANK[str(c)], _CARD_SUIT[str(c)]) for c in h),
+            key=lambda rs: (-rs[0], rs[1]),
+        )
+        enc = []
+        for rank, suit in cards:
+            lbl = relabel.get(suit)
+            if lbl is None:
+                lbl = len(relabel)
+                relabel[suit] = lbl
+            enc.append((rank, lbl))
+        # A hand is an unordered pair; sort the encoded cards so within-hand
+        # ordering never produces spurious distinct keys (matters for pairs).
+        out.append(tuple(sorted(enc)))
+    return tuple(out)

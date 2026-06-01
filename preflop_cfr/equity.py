@@ -35,8 +35,13 @@ def _rollout_equity(
     known board cards.  Returns a list of fractional win+tie shares summing to 1.
     """
     n = len(hands)
-    known = set(id(c) for h in hands for c in h) | set(id(c) for c in known_board)
-    remaining = [c for c in ALL_CARDS if id(c) not in known]
+    # Exclude dealt cards by VALUE, not object identity.  CFR-path hands are the
+    # same Card objects as ALL_CARDS (random.sample), but build_hu_table feeds in
+    # freshly-constructed eval7.Card objects whose id() is never in ALL_CARDS —
+    # so an id()-based filter left the hole cards in the board deck and dealt
+    # them onto the board (corrupting the HU table).  str(card) is stable.
+    known = {str(c) for h in hands for c in h} | {str(c) for c in known_board}
+    remaining = [c for c in ALL_CARDS if str(c) not in known]
     need = 5 - len(known_board)
 
     # Hoist hot-loop attribute lookups; draw boards with random.sample (k draws)

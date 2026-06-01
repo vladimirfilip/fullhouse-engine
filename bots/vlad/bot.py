@@ -69,7 +69,14 @@ _FOLD, _CHECK_CALL = 0, 1
 _0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN = 2, 3, 4, 5, 6, 7, 8
 
 # ── Decision-engine configuration ──────────────────────────────────────────
-_USE_PREFLOP_TABLE = True
+# Disabled: the shipped preflop_strategy.npz was trained+keyed with the old
+# bucket encoding (preflop_cfr/cards.py hand_to_bucket had its within-block lo
+# ordering reversed, and the HU equity table was built with hole cards leaking
+# onto the board).  Those bugs are now fixed, so the bot's bucket keys no longer
+# match this stale table (non-pair hands would read the wrong hand's row).
+# Preflop runs entirely on the chart/Chen heuristic until the table is retrained
+# with the corrected solver.  See preflop_cfr/{cards,equity}.py.
+_USE_PREFLOP_TABLE = False
 
 # Postflop engine: "net" = trained GTO strategy net (balanced ranges), "mc" =
 # Monte-Carlo equity + pot-odds.  Toggle is read by _postflop_decide so the two
@@ -426,7 +433,9 @@ def _preflop_bucket(c1: str, c2: str) -> int:
     hi, lo  = (r1, r2) if r1 >= r2 else (r2, r1)
     if hi == lo:
         return 12 - hi
-    offset = 78 - hi * (hi + 1) // 2 + lo
+    # lo descending within each hi block (AKs=13, …, A2s=24): must match
+    # preflop_cfr/cards.py hand_to_bucket exactly or table lookups miss.
+    offset = (78 - hi * (hi + 1) // 2) + (hi - 1 - lo)
     return 13 + offset if suited else 91 + offset
 
 
