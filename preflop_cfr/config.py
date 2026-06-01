@@ -32,7 +32,7 @@ N_ACTIONS     = 9
 # ~4.9M info sets (≈0.08 visits/set after 400k traversals) and never converged.
 PREFLOP_ACTIONS = [FOLD, CHECK_CALL, BET_FULL_POT, ALL_IN]
 
-MAX_RAISES_PREFLOP = 2   # open + 3-bet (+ jam via ALL_IN); collapses deep 4-bet+ subtrees
+MAX_RAISES_PREFLOP = 3
 
 # ── Training ───────────────────────────────────────────────────────────────────
 # With the coarse 4-action / 2-raise tree the reachable info-set count drops to
