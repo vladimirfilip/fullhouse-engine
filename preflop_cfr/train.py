@@ -83,18 +83,22 @@ def _floor_regrets(regret_sum: dict[int, np.ndarray]):
 # ── Single-process chunk (authoritative, exact CFR+) ──────────────────────────
 
 def _run_chunk(n_iters: int, regret_sum: dict, strategy_sum: dict,
-               visit_sum: dict, start_t: int):
+               visit_sum: dict, start_t: int, regret_base: dict | None = None):
     """Run n_iters CFR+ traversals directly on the shared tables (no reset).
 
     `start_t` is the global iteration index of the first traversal in this chunk;
     the linear-CFR average-strategy weight is (start_t + i + 1) so it increases
     monotonically across the whole run, not just within a chunk.
+
+    `regret_base` (parallel workers only): the shared warm-start snapshot regrets
+    are lazily copied from on first touch.  None in single-process.
     """
     randrange = random.randrange
     for i in range(n_iters):
         t = start_t + i
         run_iteration(t % N_PLAYERS, regret_sum, strategy_sum, visit_sum,
-                      float(t + 1), dealer_seat=randrange(N_PLAYERS))
+                      float(t + 1), dealer_seat=randrange(N_PLAYERS),
+                      regret_base=regret_base)
 
 
 # ── Parallel worker (warm-start + delta) ──────────────────────────────────────
@@ -113,23 +117,30 @@ def _worker_delta(args: tuple) -> tuple[dict, dict]:
     is *write-only* during a traversal (see cfr._traverse — it is never read to
     make a decision), so a worker can accumulate it from empty and the result is
     exactly the delta to add back.  Not shipping the base strategy roughly halves
-    per-worker RAM and the pickle traffic.  Regrets are turned into a delta in
-    place to avoid holding a third full table.
+    per-worker RAM and the pickle traffic.
+
+    The warm-start regrets are NOT copied up front.  ``local_r`` starts empty and
+    cfr._traverse lazily copies a row out of ``base_r`` the first time the chunk
+    touches it (regret_base=base_r).  A chunk that visits only part of the tree
+    therefore materialises only that part, so peak per-worker RAM is "info sets
+    touched this chunk" rather than "the whole table" — which is what lets more
+    workers fit under the RAM budget (see _safe_workers).
     """
     n_iters, seed, base_r, base_t = args
     random.seed(seed)
     np.random.seed(seed & 0xFFFFFFFF)
 
-    # Warm-started regret copy (evolves from the merged state); strategy and
-    # visit tables start empty so their from-empty totals ARE the deltas.
-    local_r = {k: v.copy() for k, v in base_r.items()}
+    # local_r evolves from the warm-start via lazy copy-on-touch out of base_r;
+    # strategy and visit tables start empty so their from-empty totals ARE the
+    # deltas.
+    local_r: dict[int, np.ndarray] = {}
     local_s: dict[int, np.ndarray] = {}
     local_v: dict[int, float]      = {}
 
-    _run_chunk(n_iters, local_r, local_s, local_v, base_t)
+    _run_chunk(n_iters, local_r, local_s, local_v, base_t, regret_base=base_r)
 
-    # Convert regrets to a delta in place: reuse local_r as the output so we
-    # never hold base + working + delta simultaneously.
+    # local_r holds only the rows this chunk touched (each = base value + chunk
+    # updates).  Convert in place to the delta to merge back.
     for k in list(local_r.keys()):
         b = base_r.get(k)
         if b is None:
@@ -153,18 +164,28 @@ def _table_nbytes(table: dict[int, np.ndarray]) -> int:
     return len(table) * (72 + 112 + 100 + 28)
 
 
+# Per-worker peak RAM as a multiple of the live regret-table size.  With lazy
+# copy-on-touch warm-start (see _worker_delta) a worker holds: the received base
+# snapshot (1×) + only the rows its chunk touches + its strategy delta.  Rounds
+# are split across workers, so each chunk touches a fraction of the tree and the
+# old up-front full copy (which made it ~3×) is gone — ~2× is now a safe estimate.
+# Raise this if you still see OOM (it trades worker count for headroom); lowering
+# it past real usage risks an OOM-kill.  Overridable via PREFLOP_WORKER_TABLE_MULT.
+_WORKER_TABLE_MULT = float(os.environ.get("PREFLOP_WORKER_TABLE_MULT", "2"))
+
+
 def _safe_workers(n_workers: int, regret_sum: dict, budget_gb: float) -> int:
     """
     Cap concurrent workers so peak RAM stays under budget.  Each worker holds
-    roughly: warm-started regrets + accumulated strategy + the regret pickle
-    in flight ≈ 3 × table_size.  As the tables grow over the run this returns a
-    smaller number, which is what keeps the full run from being OOM-killed.
+    roughly _WORKER_TABLE_MULT × table_size (see that constant).  As the table
+    grows over the run this returns a smaller number, which is what keeps the
+    full run from being OOM-killed.
     """
     table = _table_nbytes(regret_sum)
     if table == 0:
         return n_workers
     budget = budget_gb * (1024 ** 3)
-    fit = int(budget // (3 * table))
+    fit = int(budget // (_WORKER_TABLE_MULT * table))
     return max(1, min(n_workers, fit))
 
 

@@ -80,10 +80,26 @@ def _strategy_over_legal(regrets: np.ndarray, legal: list[int]) -> list[float]:
     return [u] * len(legal)
 
 
-def _get_or_init(table: dict[int, np.ndarray], key: int) -> np.ndarray:
+def _get_or_init(table: dict[int, np.ndarray], key: int,
+                 base: dict[int, np.ndarray] | None = None) -> np.ndarray:
+    """
+    Fetch the row for `key`, creating it on first touch.
+
+    When `base` is given (parallel worker warm-start), a missing row is *copied
+    from base on first touch* rather than the whole base table being copied up
+    front.  A worker therefore only materialises the info sets its chunk actually
+    visits — peak per-worker memory drops from "all info sets" to "touched this
+    chunk", which lets more workers fit under the same RAM budget.  With base=None
+    (single-process master, or the strategy/visit tables) a missing row is zeros.
+    """
     v = table.get(key)
     if v is None:
-        v = np.zeros(config.N_ACTIONS, dtype=np.float64)
+        if base is not None:
+            b = base.get(key)
+            v = b.copy() if b is not None else np.zeros(config.N_ACTIONS,
+                                                         dtype=np.float64)
+        else:
+            v = np.zeros(config.N_ACTIONS, dtype=np.float64)
         table[key] = v
     return v
 
@@ -110,6 +126,7 @@ def _traverse(
     visit_sum:    dict[int, float],
     buckets:      list[int],
     weight:       float,
+    regret_base:  dict[int, np.ndarray] | None = None,
 ) -> float:
     """
     Recursive ES-MCCFR (CFR+) traversal.  Returns traverser's EV from this node.
@@ -119,6 +136,11 @@ def _traverse(
     reach π₋ᵢ(I).  Regret and average-strategy updates therefore carry NO
     explicit reach weight (the average-strategy iteration weight is a separate,
     deliberate linear-CFR term — not a reach term).
+
+    `regret_base` (parallel worker warm-start, see train._worker_delta): the
+    shared regret snapshot this chunk warm-starts from.  Regret rows are lazily
+    copied out of it on first touch; single-process passes None (regret_sum is
+    the live master).
     """
     if is_terminal(state) or state.to_act == -1:
         # to_act == -1: betting round closed with ≥2 live → equity leaf.
@@ -128,7 +150,7 @@ def _traverse(
     legal = legal_actions(state)
     key   = _infoset_key(seat, state.dealer_seat, state.history, buckets[seat])
 
-    regrets = _get_or_init(regret_sum, key)
+    regrets = _get_or_init(regret_sum, key, regret_base)
     probs   = _strategy_over_legal(regrets, legal)   # aligned to `legal`
 
     if seat != traverser:
@@ -149,11 +171,13 @@ def _traverse(
                 chosen = a
                 break
         return _traverse(apply_action(state, chosen), traverser,
-                         regret_sum, strategy_sum, visit_sum, buckets, weight)
+                         regret_sum, strategy_sum, visit_sum, buckets, weight,
+                         regret_base)
 
     # Traverser node: enumerate all legal actions, accumulate RM+ regrets.
     action_evs = [_traverse(apply_action(state, a), traverser,
-                            regret_sum, strategy_sum, visit_sum, buckets, weight)
+                            regret_sum, strategy_sum, visit_sum, buckets, weight,
+                            regret_base)
                   for a in legal]
     node_ev = 0.0
     for i in range(len(legal)):
@@ -173,11 +197,14 @@ def run_iteration(
     visit_sum:    dict[int, float],
     weight:       float,
     dealer_seat:  int = 0,
+    regret_base:  dict[int, np.ndarray] | None = None,
 ) -> float:
     """
     Run one ES-MCCFR (CFR+) traversal for `traverser` from a freshly-dealt game.
     Updates regret_sum, strategy_sum and visit_sum in place.  `weight` is the
     linear-CFR iteration weight applied to the average-strategy accumulation.
+    `regret_base` is the optional warm-start snapshot for lazy copy-on-touch in
+    parallel workers (None in single-process).
     Returns the traverser's chip-EV estimate for this traversal.
     """
     # Only the hole cards are dealt from this deck (board cards for equity leaves
@@ -189,4 +216,4 @@ def run_iteration(
     # rather than re-deriving it (string conversion + dict lookups) per node.
     buckets = [hand_to_bucket(h[0], h[1]) for h in state.hands]
     return _traverse(state, traverser, regret_sum, strategy_sum, visit_sum,
-                     buckets, weight)
+                     buckets, weight, regret_base)

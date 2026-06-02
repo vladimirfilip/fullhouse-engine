@@ -18,7 +18,9 @@ Training (regret / strategy net SGD steps) remains on the main process CPU.
 
 from __future__ import annotations
 import argparse
+import glob
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +47,22 @@ from .config import (
 STRATEGY_CKPT_EVERY  = 25    # train+export strategy snapshot every N iterations
 STRATEGY_CKPT_STEPS  = 500   # quick mid-run training steps (vs the final pass)
 from .networks import make_regret_net, make_strategy_net
-from .export import export_net
+from .export import export_net, load_net
+
+# Checkpoints are written here by the training loop (regret_net_iter_{t}.npz).
+CKPT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "checkpoints"))
+
+
+def _latest_checkpoint(ckpt_dir: str = CKPT_DIR):
+    """Return (path, iteration) of the most recently modified regret-net
+    checkpoint, or (None, 0) if none exist."""
+    paths = glob.glob(os.path.join(ckpt_dir, "regret_net_iter_*.npz"))
+    if not paths:
+        return None, 0
+    latest = max(paths, key=os.path.getmtime)
+    m = re.search(r"regret_net_iter_(\d+)\.npz$", os.path.basename(latest))
+    iteration = int(m.group(1)) if m else 0
+    return latest, iteration
 
 # ── Load C++ data-generation extension ────────────────────────────────────────
 # MSVC puts the .pyd in build/Release/; GCC puts the .so directly in build/.
@@ -214,6 +231,7 @@ def train(
     k_iterations: int = K_ITERATIONS,
     games_per_iter: int = GAMES_PER_ITER,
     n_workers: int = N_WORKERS,
+    resume_from: str | None = None,
 ) -> None:
     # Device order: CUDA (NVIDIA) > DirectML (AMD/Intel on Windows) > CPU.
     # DirectML is opt-in via `pip install torch-directml`; absence is silent.
@@ -237,7 +255,23 @@ def train(
     strategy_net = make_strategy_net().to(device)
     regret_net   = make_regret_net().to(device)
 
-    for t in range(1, k_iterations + 1):
+    # ── Resume: warm-start the regret net from a checkpoint ────────────────────
+    # Only the regret net is checkpointed (not the reservoir buffers), so we
+    # continue data-gen with the loaded policy and rebuild buffers from scratch.
+    # Iteration numbering continues past the checkpoint so Linear-CFR weighting
+    # stays monotonic and new checkpoints don't clobber the old ones.
+    start_iter = 0
+    if resume_from is not None:
+        load_net(regret_net, resume_from)
+        m = re.search(r"regret_net_iter_(\d+)\.npz$", os.path.basename(resume_from))
+        start_iter = int(m.group(1)) if m else 0
+        print(f"Resuming from {os.path.abspath(resume_from)} "
+              f"(iteration {start_iter}); training through {k_iterations}.")
+        if start_iter >= k_iterations:
+            print(f"Checkpoint iteration {start_iter} >= target {k_iterations}; "
+                  f"nothing to do. Raise --iters to continue training.")
+
+    for t in range(start_iter + 1, k_iterations + 1):
         t0 = time.perf_counter()
         print(f"\n=== Iteration {t}/{k_iterations} ===")
 
@@ -318,9 +352,24 @@ if __name__ == "__main__":
                     help="Parallel worker processes for data generation")
     ap.add_argument("--quick",   action="store_true",
                     help="Smoke-test: 5 iterations x 200 games")
+    ap.add_argument("--resume",  action="store_true",
+                    help="Continue from the last-modified regret-net checkpoint "
+                         "in ./checkpoints/")
+    ap.add_argument("--resume-from", type=str, default=None,
+                    help="Continue from a specific regret-net checkpoint .npz")
     args = ap.parse_args()
 
+    resume_from = args.resume_from
+    if args.resume and resume_from is None:
+        resume_from, it = _latest_checkpoint()
+        if resume_from is None:
+            print(f"--resume: no checkpoints found in {CKPT_DIR}; starting fresh.")
+        else:
+            print(f"--resume: latest checkpoint is {resume_from} (iteration {it}).")
+
     if args.quick:
-        train(k_iterations=5, games_per_iter=200, n_workers=args.workers)
+        train(k_iterations=5, games_per_iter=200, n_workers=args.workers,
+              resume_from=resume_from)
     else:
-        train(k_iterations=args.iters, games_per_iter=args.games, n_workers=args.workers)
+        train(k_iterations=args.iters, games_per_iter=args.games,
+              n_workers=args.workers, resume_from=resume_from)

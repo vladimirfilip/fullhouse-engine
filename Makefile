@@ -1,5 +1,5 @@
 .PHONY: install install-train install-train-gpu install-system install-vm \
-        build-cpp clean-cpp train train-quick \
+        build-cpp clean-cpp train train-quick train-resume \
         train-preflop train-preflop-quick \
         demo test validate clean release release-zip
 
@@ -113,6 +113,12 @@ train:
 
 train-quick:
 	$(VPY) -m deep_cfr.train --quick
+
+# Continue training from the last-modified regret-net checkpoint in
+# ./checkpoints/. Buffers aren't persisted, so this warm-starts the policy and
+# rebuilds reservoirs from scratch. Override the target iteration with ITERS=N.
+train-resume:
+	$(VPY) -m deep_cfr.train --resume $(if $(ITERS),--iters $(ITERS),)
 
 # ── Preflop tabular CFR (pure Python + eval7, no C++ required) ───────────────
 # RAM budget for the live CFR tables. Left unset here so it defers to
