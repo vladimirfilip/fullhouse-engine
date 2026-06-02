@@ -76,6 +76,13 @@ TARGET_VISITS_PER_SET = 400
 # checkpoints, for CONVERGENCE_PATIENCE checkpoints in a row.  This is what
 # actually ends the run — so the budget is spent reaching convergence, not
 # chasing rare info sets long after the strategy has settled.
+# Early-stop master switch.  Disabled for the guaranteed fixed-iteration run:
+# the premium-drift gate watches only the UTG-open node (perfect recall, settles
+# first) so it fired prematurely while SB/BB/3-bet nodes were still diffuse —
+# the main reason the shipped table looked unconverged.  With a fixed --iters
+# budget sized to over-cover the tree (see ITERATIONS / plan §E), run the whole
+# budget; the drift/visit prints below stay on as diagnostics only.
+EARLY_STOP_ENABLED    = False
 CONVERGENCE_DRIFT_EPS = 0.01
 CONVERGENCE_PATIENCE  = 3
 # Guard against the failure that shipped the last table: the premium-hand drift

@@ -19,6 +19,22 @@ from preflop_cfr.cards import fresh_deck, deal_hands
 from preflop_cfr.equity import multiway_equity
 
 
+# ── Equity-realization factors (postflop-aware leaf) ──────────────────────────
+# The preflop-only model has no postflop play, so a checked-to-flop leaf would
+# otherwise pay every hand its raw all-in equity for free — rewarding cheap
+# multiway flops and giving aggression no value (the limp-heavy / loose-blind
+# pathology).  We approximate postflop realization at such leaves: equity is
+# reweighted toward in-position and the seat with initiative, then renormalised
+# so the split stays zero-sum (a valid pot division).  All-in showdowns are NOT
+# adjusted — there cards run out and equity is fully realised.
+#
+# Starting values are a calibration knob (see plan): verify opens raise (not
+# limp) and blinds tighten, then tune.
+REAL_OOP_FACTOR  = 0.85   # most out-of-position live seat
+REAL_IP_FACTOR   = 1.05   # most in-position live seat
+REAL_INIT_BONUS  = 0.07   # ×(1+β) for the preflop aggressor, ×(1-β) for callers
+
+
 # ── Abstract-to-chips sizing (mirrors bot.py _abstract_to_raw, no jitter) ─────
 
 _FRAC_MAP: dict[int, float] = {
@@ -114,6 +130,41 @@ def is_terminal(state: PreflopState) -> bool:
     return all(state.all_in[i] or state.stacks[i] == 0 for i in live)
 
 
+def _last_aggressor_seat(state: PreflopState) -> int:
+    """Seat of the last voluntary raise/all-in (initiative), or -1 if none."""
+    for seat, action in reversed(state.history):
+        if action not in (config.FOLD, config.CHECK_CALL):
+            return seat
+    return -1
+
+
+def _realization_weights(state: PreflopState, live: list[int]) -> list[float]:
+    """
+    Per-live-seat equity-realization weight for a checked-to-flop leaf.
+
+    Combines postflop position (most-IP seat realises most) with initiative
+    (the preflop aggressor realises more, pure callers less).  Returned in the
+    same order as `live`; the caller renormalises so the pot split is zero-sum.
+    """
+    n = state.n_players
+    # Postflop action order: SB acts first … BTN last.  rank = later = more IP.
+    post_rank = {seat: (seat - state.dealer_seat - 1) % n for seat in live}
+    ranks_sorted = sorted(post_rank.values())
+    lo, hi = ranks_sorted[0], ranks_sorted[-1]
+    span = (hi - lo) or 1
+    aggressor = _last_aggressor_seat(state)
+
+    weights = []
+    for seat in live:
+        frac = (post_rank[seat] - lo) / span        # 0 (most OOP) … 1 (most IP)
+        w = REAL_OOP_FACTOR + frac * (REAL_IP_FACTOR - REAL_OOP_FACTOR)
+        if aggressor != -1:
+            w *= (1.0 + REAL_INIT_BONUS) if seat == aggressor \
+                else (1.0 - REAL_INIT_BONUS)
+        weights.append(w)
+    return weights
+
+
 def terminal_utilities(state: PreflopState) -> list[float]:
     """
     Chip-EV utilities at a terminal node.
@@ -129,6 +180,19 @@ def terminal_utilities(state: PreflopState) -> list[float]:
 
     live_hands = [state.hands[i] for i in live]
     equities   = multiway_equity(live_hands)
+
+    # All-in showdown → cards run out, equity fully realised, no adjustment.
+    # Otherwise ≥1 live seat has chips behind (postflop play the flat model
+    # ignores) → reweight equity by realization factors, renormalised to keep
+    # the pot split zero-sum.
+    all_in_showdown = all(state.all_in[i] or state.stacks[i] == 0 for i in live)
+    if not all_in_showdown:
+        w = _realization_weights(state, live)
+        weighted = [equities[j] * w[j] for j in range(len(live))]
+        tot = sum(weighted)
+        if tot > 0:
+            equities = [x / tot for x in weighted]
+
     for j, seat in enumerate(live):
         utils[seat] += equities[j] * state.pot
 

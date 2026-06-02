@@ -290,7 +290,7 @@ def train(
         round_iters = checkpoint_every
         if verbose:
             r_mb = capacity * 9 * 8 / 1e6
-            s_mb = capacity * 9 * 4 / 1e6
+            s_mb = capacity * 9 * 8 / 1e6
             print(f"[preflop_cfr] Shared-mem mode: {n_workers} workers  "
                   f"capacity={capacity:,} slots  "
                   f"regrets={r_mb:.0f} MB  strategy={s_mb:.0f} MB",
@@ -387,7 +387,8 @@ def train(
 
                 prev_premium = cur_premium
 
-                if (drift is not None
+                if (config.EARLY_STOP_ENABLED
+                        and drift is not None
                         and drift < config.CONVERGENCE_DRIFT_EPS
                         and met_frac >= config.CONVERGENCE_MIN_MET_FRAC):
                     stable_ckpts += 1
@@ -481,10 +482,21 @@ def _visit_histogram(visit_sum: dict[int, float]) -> None:
           flush=True)
 
 
+def _utg_open_key(bucket: int) -> int:
+    """Info-set key for the UTG first-in node (the diagnostic probe).
+
+    UTG faces the BB unraised: hero_pos=3, n_raises=0, n_live=6, not committed,
+    facing = the BB relative to the 150-chip blind pot.
+    """
+    from preflop_cfr.abstraction import infoset_key, facing_bucket
+    facing = facing_bucket(config.BIG_BLIND,
+                           config.SMALL_BLIND + config.BIG_BLIND)
+    return infoset_key(3, 0, facing, config.N_PLAYERS, 0, 6, bucket)
+
+
 def _premium_snapshot(strategy_sum: dict[int, np.ndarray]) -> dict[str, np.ndarray]:
-    """Average-strategy vectors for the premium UTG-open hands (history empty)."""
+    """Average-strategy vectors for the premium UTG-open hands."""
     from preflop_cfr.cards import BUCKET_INFO, RANKS
-    from preflop_cfr.abstraction import infoset_key
 
     name_to_bucket: dict[str, int] = {}
     for bucket, (hi, lo, suited) in enumerate(BUCKET_INFO):
@@ -492,13 +504,12 @@ def _premium_snapshot(strategy_sum: dict[int, np.ndarray]) -> dict[str, np.ndarr
         name = f"{RANKS[hi]}{RANKS[lo]}{suit_char}"
         name_to_bucket[name] = bucket
 
-    utg_pos = 3  # (UTG_seat - dealer) % 6 in 6-max
     snap: dict[str, np.ndarray] = {}
     for name in _PREMIUM_HANDS:
         bucket = name_to_bucket.get(name)
         if bucket is None:
             continue
-        ssum = strategy_sum.get(infoset_key(utg_pos, (), bucket))
+        ssum = strategy_sum.get(_utg_open_key(bucket))
         if ssum is None:
             continue
         total = ssum.sum()
@@ -562,14 +573,10 @@ def _print_spot_check(strategy_sum: dict[int, np.ndarray], verbose: bool):
         return
 
     from preflop_cfr.cards import BUCKET_INFO, RANKS
-    from preflop_cfr.abstraction import infoset_key
 
-    # UTG in 6-max: hero_position = (UTG_seat - dealer) % 6 = 3, history empty.
-    utg_pos = 3
     open_pct = {}
     for bucket, (hi, lo, suited) in enumerate(BUCKET_INFO):
-        key = infoset_key(utg_pos, (), bucket)
-        ssum = strategy_sum.get(key)
+        ssum = strategy_sum.get(_utg_open_key(bucket))
         if ssum is None:
             continue
         total = ssum.sum()

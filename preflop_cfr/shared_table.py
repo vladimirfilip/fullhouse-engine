@@ -6,8 +6,13 @@ pickling or IPC per iteration:
 
     keys     int64   [capacity]       — INT64_MIN marks an empty slot
     regrets  float64 [capacity, 9]    — RM+ cumulative regrets (≥0)
-    strategy float32 [capacity, 9]    — iteration-weighted strategy sum
+    strategy float64 [capacity, 9]    — iteration-weighted strategy sum
     visits   float64 [capacity]       — true visit count (for prune)
+
+    `strategy` is float64 (not float32): the exported average strategy is what
+    the bot ships, and under linear-CFR weighting the running sum grows to ~1e9,
+    where float32's ~7-digit mantissa loses low-probability actions against the
+    large total.  float64 keeps the average faithful.
 
 Regret/strategy/visit updates are written directly (Hogwild) — ES-MCCFR
 already produces noisy gradient estimates, so the rare lost update from
@@ -82,11 +87,11 @@ class SharedHashTable:
         kw  = dict(create=create)
         self._shm_k = SharedMemory(name=f"{pfx}k", **kw, size=cap * 8)
         self._shm_r = SharedMemory(name=f"{pfx}r", **kw, size=cap * 9 * 8)
-        self._shm_s = SharedMemory(name=f"{pfx}s", **kw, size=cap * 9 * 4)
+        self._shm_s = SharedMemory(name=f"{pfx}s", **kw, size=cap * 9 * 8)
         self._shm_v = SharedMemory(name=f"{pfx}v", **kw, size=cap * 8)
         self.keys     = np.ndarray(cap,      dtype=np.int64,   buffer=self._shm_k.buf)
         self.regrets  = np.ndarray((cap, 9), dtype=np.float64, buffer=self._shm_r.buf)
-        self.strategy = np.ndarray((cap, 9), dtype=np.float32, buffer=self._shm_s.buf)
+        self.strategy = np.ndarray((cap, 9), dtype=np.float64, buffer=self._shm_s.buf)
         self.visits   = np.ndarray(cap,      dtype=np.float64, buffer=self._shm_v.buf)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -180,7 +185,7 @@ class SharedHashTable:
             self.regrets[idx] = rv
             sv = strategy_sum.get(k)
             if sv is not None:
-                self.strategy[idx] = sv.astype(np.float32)
+                self.strategy[idx] = sv.astype(np.float64)
             vv = visit_sum.get(k)
             if vv is not None:
                 self.visits[idx] = float(vv)

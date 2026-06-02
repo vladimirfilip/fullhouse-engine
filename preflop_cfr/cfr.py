@@ -46,7 +46,7 @@ import numpy as np
 
 from preflop_cfr import config
 from preflop_cfr.cards import hand_to_bucket, ALL_CARDS
-from preflop_cfr.abstraction import infoset_key
+from preflop_cfr.abstraction import infoset_key, facing_bucket
 from preflop_cfr.game import (
     PreflopState, make_initial_state, is_terminal,
     terminal_utilities, legal_actions, apply_action,
@@ -106,15 +106,42 @@ def _get_or_init(table: dict[int, np.ndarray], key: int,
     return v
 
 
-def _infoset_key(seat: int, dealer_seat: int, history: list, bucket: int) -> int:
-    """Memoized 64-bit info-set key for (position-rel-dealer, history, bucket)."""
-    hero_pos = (seat - dealer_seat) % N_PLAYERS
-    hist     = tuple(a for _, a in history)
-    trunc    = hist[-config.HISTORY_TRUNCATION_LEN:]
-    tk       = (hero_pos, trunc, bucket)  # cache on truncated key — fewer entries
+_SB_SEAT_OFFSET = 1
+_BB_SEAT_OFFSET = 2
+
+
+def _blind_for(seat: int, dealer_seat: int) -> int:
+    """Forced blind posted by `seat` (0 for non-blind seats)."""
+    if seat == (dealer_seat + _SB_SEAT_OFFSET) % N_PLAYERS:
+        return config.SMALL_BLIND
+    if seat == (dealer_seat + _BB_SEAT_OFFSET) % N_PLAYERS:
+        return config.BIG_BLIND
+    return 0
+
+
+def _last_aggr_rel(state: PreflopState, seat: int) -> int:
+    """(last raiser seat − hero seat) % N, in 1..5; 6 if no raise yet."""
+    for s, action in reversed(state.history):
+        if action not in (config.FOLD, config.CHECK_CALL):
+            return (s - seat) % N_PLAYERS
+    return 6
+
+
+def _infoset_key(state: PreflopState, seat: int, bucket: int) -> int:
+    """Memoized 64-bit info-set key from the betting context at `seat`."""
+    hero_pos  = (seat - state.dealer_seat) % N_PLAYERS
+    owed      = state.owed(seat)
+    facing    = facing_bucket(owed, state.pot)
+    n_live    = sum(1 for f in state.folded if not f)
+    committed = 1 if state.total_inv[seat] > _blind_for(seat, state.dealer_seat) \
+        else 0
+    n_raises  = state.n_raises if state.n_raises < 3 else 3
+    last_aggr = _last_aggr_rel(state, seat)
+    tk = (hero_pos, n_raises, facing, n_live, committed, last_aggr, bucket)
     key = _KEY_CACHE.get(tk)
     if key is None:
-        key = infoset_key(hero_pos, hist, bucket)
+        key = infoset_key(hero_pos, n_raises, facing, n_live, committed,
+                          last_aggr, bucket)
         _KEY_CACHE[tk] = key
     return key
 
@@ -151,7 +178,7 @@ def _traverse(
 
     seat  = state.to_act
     legal = legal_actions(state)
-    key   = _infoset_key(seat, state.dealer_seat, state.history, buckets[seat])
+    key   = _infoset_key(state, seat, buckets[seat])
 
     regrets = _get_or_init(regret_sum, key, regret_base)
     probs   = _strategy_over_legal(regrets, legal)   # aligned to `legal`
@@ -264,7 +291,7 @@ def _traverse_shared(
 
     seat  = state.to_act
     legal = legal_actions(state)
-    key   = _infoset_key(seat, state.dealer_seat, state.history, buckets[seat])
+    key   = _infoset_key(state, seat, buckets[seat])
     idx   = table.find_or_insert(key)
 
     regrets = table.regrets[idx]                         # float64[9] shared view

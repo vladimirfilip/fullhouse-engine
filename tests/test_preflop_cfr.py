@@ -162,10 +162,15 @@ class TestInfosetKeyParity:
         }
 
     def _abstraction_key(self, your_cards, action_log, seat=3):
-        """Compute key via abstraction.py (the canonical source)."""
-        from preflop_cfr.abstraction import infoset_key_from_log, amount_to_abstract
+        """Compute the canonical betting-context key independently of bot.py.
+
+        Reconstructs (hero_pos, n_raises, facing, n_live, committed,
+        last_aggr_rel, bucket) from the action log and calls the canonical
+        abstraction.infoset_key — an independent reimplementation of the same
+        spec the bot mirror must match.
+        """
+        from preflop_cfr.abstraction import infoset_key, facing_bucket
         from preflop_cfr.cards import hand_to_bucket
-        from preflop_cfr.config import ALL_IN
 
         al = action_log
         n  = 6
@@ -174,31 +179,33 @@ class TestInfosetKeyParity:
 
         bucket  = hand_to_bucket(eval7.Card(your_cards[0]), eval7.Card(your_cards[1]))
 
-        history = []
         pot, cur_bet = 0, 100
-        bets = {}
+        bets, blind, folded = {}, {}, set()
+        n_raises = 0
+        last_aggr_seat = None
         for e in al:
             act, eseat, amt = e["action"], e["seat"], e.get("amount", 0)
-            if act == "small_blind":
-                bets[eseat] = amt; pot += amt; cur_bet = max(cur_bet, amt); continue
-            if act == "big_blind":
-                bets[eseat] = amt; pot += amt; cur_bet = max(cur_bet, amt); continue
+            if act in ("small_blind", "big_blind"):
+                bets[eseat] = amt; blind[eseat] = amt
+                pot += amt; cur_bet = max(cur_bet, amt); continue
             bst = bets.get(eseat, 0)
             if act == "fold":
-                abstract = 0
+                folded.add(eseat)
             elif act in ("check", "call"):
-                abstract = 1; bets[eseat] = cur_bet; pot += max(0, cur_bet - bst)
-            elif act == "all_in":
-                abstract = ALL_IN
+                bets[eseat] = cur_bet; pot += max(0, cur_bet - bst)
+            elif act in ("all_in", "raise"):
+                if amt > cur_bet:
+                    n_raises += 1; last_aggr_seat = eseat
                 pot += amt - bst; cur_bet = max(cur_bet, amt); bets[eseat] = amt
-            elif act == "raise":
-                abstract = amount_to_abstract(amt, pot, cur_bet, bst)
-                pot += amt - bst; cur_bet = max(cur_bet, amt); bets[eseat] = amt
-            else:
-                continue
-            history.append((eseat, abstract))
 
-        return infoset_key_from_log(seat, dealer, n, history, bucket)
+        hero_pos  = (seat - dealer) % n
+        owed      = max(0, cur_bet - bets.get(seat, 0))
+        facing    = facing_bucket(owed, pot)
+        n_live    = n - len(folded)
+        committed = 1 if bets.get(seat, 0) > blind.get(seat, 0) else 0
+        nr        = n_raises if n_raises < 3 else 3
+        last_aggr = (last_aggr_seat - seat) % n if last_aggr_seat is not None else 6
+        return infoset_key(hero_pos, nr, facing, n_live, committed, last_aggr, bucket)
 
     def _bot_key(self, your_cards, action_log, seat=3):
         """Compute key via bot.py mirror."""

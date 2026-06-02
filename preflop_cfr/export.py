@@ -22,7 +22,12 @@ import numpy as np
 from preflop_cfr import config
 
 
-VERSION = "1"
+VERSION = "2"
+# Identifies the info-set key encoding.  bot.py refuses to load a table whose
+# key_version it doesn't recognise (falls back to the heuristic), so a stale
+# table can never be read with a mismatched mirror.  Bump whenever the
+# abstraction.infoset_key encoding changes.
+KEY_VERSION = "betting_context_v1"
 
 
 def export_strategy(
@@ -67,10 +72,11 @@ def export_strategy(
         path,
         keys      = keys_arr,
         strategy  = strategy_arr,
-        version   = np.array(VERSION),
-        n_players = np.array(config.N_PLAYERS),
-        stack_bb  = np.array(config.INITIAL_STACK // config.BIG_BLIND),
-        actions   = np.array(json.dumps(config.PREFLOP_ACTIONS)),
+        version     = np.array(VERSION),
+        key_version = np.array(KEY_VERSION),
+        n_players   = np.array(config.N_PLAYERS),
+        stack_bb    = np.array(config.INITIAL_STACK // config.BIG_BLIND),
+        actions     = np.array(json.dumps(config.PREFLOP_ACTIONS)),
     )
     return n
 
@@ -85,6 +91,13 @@ def load_strategy(path: str = config.EXPORT_PATH) -> dict[int, np.ndarray]:
     n_players = int(data["n_players"])
     stack_bb  = int(data["stack_bb"])
     expected_bb = config.INITIAL_STACK // config.BIG_BLIND
+
+    kv = str(data["key_version"]) if "key_version" in data else "legacy"
+    if kv != KEY_VERSION:
+        raise ValueError(
+            f"Strategy table key_version={kv!r} != {KEY_VERSION!r}; "
+            "table was trained with a different info-set key encoding."
+        )
 
     if n_players != config.N_PLAYERS:
         raise ValueError(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import random
+import zlib
 
 import numpy as np
 import eval7
@@ -29,10 +30,17 @@ def _rollout_equity(
     hands: list[list[eval7.Card]],
     known_board: list[eval7.Card],
     n_boards: int,
+    rng: random.Random | None = None,
 ) -> list[float]:
     """
     Monte Carlo equity for n players, given their concrete hole cards and any
     known board cards.  Returns a list of fractional win+tie shares summing to 1.
+
+    `rng`: when given, board sampling draws from this dedicated Random instead of
+    the global RNG.  Multiway leaves seed it deterministically per matchup so
+    every parallel worker freezes the SAME equity (CFR needs a stationary game;
+    independent per-worker MC noise made workers optimise slightly different
+    games — see plan §A.5).
     """
     n = len(hands)
     # Exclude dealt cards by VALUE, not object identity.  CFR-path hands are the
@@ -51,7 +59,7 @@ def _rollout_equity(
     # using a single random()*range multiply per card.  `remaining` is a private
     # throwaway list, so we shuffle it in place and never copy — a permuted prefix
     # is still a uniform draw, so successive boards stay correctly distributed.
-    rnd      = random.random
+    rnd      = rng.random if rng is not None else random.random
     evaluate = eval7.evaluate
     m        = len(remaining)
     tally    = [0.0] * n
@@ -196,6 +204,11 @@ def multiway_equity(hands: list[list[eval7.Card]]) -> list[float]:
     if key in _multiway_cache:
         return _multiway_cache[key]
 
-    result = _rollout_equity(hands, [], MULTIWAY_MC_BOARDS)
+    # Seed a dedicated RNG from the (process-stable) matchup key so every worker
+    # freezes the SAME equity for this leaf — a stationary game for CFR.  Python's
+    # built-in hash() is salted per process, so derive a stable seed via crc32.
+    seed = zlib.crc32(repr(key).encode())
+    result = _rollout_equity(hands, [], MULTIWAY_MC_BOARDS,
+                             rng=random.Random(seed))
     _multiway_cache[key] = result
     return result

@@ -69,14 +69,15 @@ _FOLD, _CHECK_CALL = 0, 1
 _0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN = 2, 3, 4, 5, 6, 7, 8
 
 # ── Decision-engine configuration ──────────────────────────────────────────
-# Disabled: the shipped preflop_strategy.npz was trained+keyed with the old
-# bucket encoding (preflop_cfr/cards.py hand_to_bucket had its within-block lo
-# ordering reversed, and the HU equity table was built with hole cards leaking
-# onto the board).  Those bugs are now fixed, so the bot's bucket keys no longer
-# match this stale table (non-pair hands would read the wrong hand's row).
-# Preflop runs entirely on the chart/Chen heuristic until the table is retrained
-# with the corrected solver.  See preflop_cfr/{cards,equity}.py.
-_USE_PREFLOP_TABLE = False
+# Temporary substitution: the trained CFR solve never converged, so the shipped
+# preflop_strategy.npz is a *rudimentary* chart-derived table built by
+# preflop_cfr/gen_rudimentary.py — it enumerates the 6-max 100bb betting tree and
+# writes the bot's own open/3-bet charts at every node, keyed with the corrected
+# bucket encoding (verified key-parity against this bot in verify_table.py).  When
+# True, _preflop_table_decide consults it first and falls back to the chart/Chen
+# heuristic for out-of-scope spots.  Swap the .npz for a real solve when one
+# converges; the loader/keying stay identical.
+_USE_PREFLOP_TABLE = True
 
 # Postflop engine: "net" = trained GTO strategy net (balanced ranges), "mc" =
 # Monte-Carlo equity + pot-odds.  Toggle is read by _postflop_decide so the two
@@ -85,8 +86,10 @@ _POSTFLOP_ENGINE = os.environ.get("VLAD_POSTFLOP_ENGINE", "net")
 
 # Risk gate: never commit more than this fraction of the effective stack on a
 # single street without clearing the street/commitment equity floor (see
-# _risk_gate).  Guards against stacking off light to pressure bots.
-_RISK_COMMIT_FRAC = 0.35
+# _risk_gate).  Guards against stacking off light to pressure bots.  Tightened
+# 0.35 -> 0.25 for drawdown control: more medium-pot commitments now have to
+# clear the equity floor instead of passing through unchecked.
+_RISK_COMMIT_FRAC = 0.25
 
 # Raise ladder: (action_index, rb_fn) where rb_fn(eff_pot) -> raise-by amount.
 # Single source of truth for _abstract_to_raw and _legal_actions.
@@ -107,9 +110,10 @@ _RAISE_LADDER = [
 # hands, check the nuts, or over-call clear losers. These guards reuse the equity
 # that's already in hand to (1) cap bet/raise size by equity, (1b) floor
 # aggression with the nuts, (2) up-size value vs calling stations, (3) hard-fold
-# when equity is far below pot odds. Gated OFF by default so it can be A/B'd
-# against the current `net` behaviour; flip VLAD_EQUITY_CLAMP=1 to enable.
-_EQUITY_CLAMP          = _envf("VLAD_EQUITY_CLAMP", 0.0) >= 0.5
+# when equity is far below pot odds. Enabled by default for drawdown control:
+# the hard-fold (3) and size cap (1) directly trim the net's worst over-commits.
+# Set VLAD_EQUITY_CLAMP=0 to A/B against the unclamped `net` behaviour.
+_EQUITY_CLAMP          = _envf("VLAD_EQUITY_CLAMP", 1.0) >= 0.5
 # Hard-fold edge is READ-AWARE: the raw equity-vs-pot-odds edge below which we
 # fold outright. Looser (more negative => fold less) vs over-bluffers, tighter
 # (=> fold more) vs value-only lines, so the guard coheres with the Module D1
@@ -620,81 +624,101 @@ def _pf_amount_to_abstract(raise_to: int, pot: int,
     return best_idx
 
 
+# -- mirrored: facing_bucket (preflop_cfr/abstraction.py) --
+def _pf_facing_bucket(owed: int, pot: int) -> int:
+    """0 = nothing owed (can check); 1 = ≤0.40·pot; 2 = ≤0.85·pot; 3 = >0.85."""
+    if owed <= 0:
+        return 0
+    r = owed / pot if pot > 0 else 0.0
+    if r <= 0.40:
+        return 1
+    if r <= 0.85:
+        return 2
+    return 3
+
+
 # -- mirrored: infoset_key (preflop_cfr/abstraction.py) --
+# Betting-context key: hero_pos | n_raises | facing | n_live | committed | bucket.
+# Must match abstraction.infoset_key byte-for-byte (see verify_table.py parity
+# check). Replays the action log to reconstruct the same public state the solver
+# saw at this node (pot/current_bet/contributions/folds/raises), using identical
+# pot accounting so facing buckets line up.
 def _preflop_infoset_key(gs: dict) -> int:
     """Compute the preflop info-set hash for the current game state."""
-    al          = gs["action_log"]
-    hero_pos, _ = _hero_position(gs)
-    bucket      = _preflop_bucket(gs["your_cards"][0], gs["your_cards"][1])
+    al              = gs["action_log"]
+    hero_pos, n_in_game = _hero_position(gs)
+    hero_seat       = gs["seat_to_act"]
+    bucket          = _preflop_bucket(gs["your_cards"][0], gs["your_cards"][1])
 
-    # Replay action log to build history (non-blind actions only)
-    # Track pot/current_bet so we can translate raise amounts.
-    pot         = 0
-    current_bet = _BIG_BLIND
-    bets        = {}     # seat -> chips committed this street
-    history     = []
+    pot           = 0
+    current_bet   = _BIG_BLIND
+    bets          = {}      # seat -> chips committed this hand (preflop=1 street)
+    blind         = {}      # seat -> forced blind posted
+    folded        = set()
+    n_raises      = 0
+    last_aggr_seat = None
 
     for e in al:
-        act  = e.get("action", "")
+        act   = e.get("action", "")
         eseat = e["seat"]
-        amt  = e.get("amount", 0)
+        amt   = e.get("amount", 0)
 
-        if act == "small_blind":
-            bets[eseat]  = amt
-            pot         += amt
-            current_bet  = max(current_bet, amt)
-            continue
-        if act == "big_blind":
-            bets[eseat]  = amt
-            pot         += amt
-            current_bet  = max(current_bet, amt)
+        if act in ("small_blind", "big_blind"):
+            bets[eseat]   = amt
+            blind[eseat]  = amt
+            pot          += amt
+            current_bet   = max(current_bet, amt)
             continue
 
         bst = bets.get(eseat, 0)
 
         if act == "fold":
-            abstract = _FOLD
+            folded.add(eseat)
         elif act in ("check", "call"):
-            abstract = _CHECK_CALL
             bets[eseat]  = current_bet
             pot         += max(0, current_bet - bst)
-        elif act == "all_in":
+        elif act in ("all_in", "raise"):
             # The engine tags every full-stack commit as "all_in" (it normalises
-            # full-stack "raise" to "all_in" too), so map directly to the ALL_IN
-            # token.  _pf_amount_to_abstract can only emit sized-raise indices, so
-            # routing a shove through it would mis-encode it as BET_FULL_POT and
-            # query the wrong info-set (the solver tree records ALL_IN as a
-            # distinct action — see preflop_cfr/abstraction.py).
-            abstract     = _ALL_IN
+            # a full-stack "raise" to "all_in"); both can increase current_bet.
+            if amt > current_bet:
+                n_raises      += 1
+                last_aggr_seat = eseat
             pot         += amt - bst
             current_bet  = max(current_bet, amt)
             bets[eseat]  = amt
-        elif act == "raise":
-            abstract     = _pf_amount_to_abstract(amt, pot, current_bet, bst)
-            pot         += amt - bst
-            current_bet  = max(current_bet, amt)
-            bets[eseat]  = amt
-        else:
-            continue
 
-        history.append((eseat, abstract))
+    owed      = max(0, current_bet - bets.get(hero_seat, 0))
+    facing    = _pf_facing_bucket(owed, pot)
+    n_live    = n_in_game - len(folded)
+    committed = 1 if bets.get(hero_seat, 0) > blind.get(hero_seat, 0) else 0
+    nr        = n_raises if n_raises < 3 else 3
+    last_aggr = (last_aggr_seat - hero_seat) % n_in_game \
+        if last_aggr_seat is not None else 6
 
-    hist_tuple = tuple(a for _, a in history)
-    _TRUNC = 4  # must match preflop_cfr/config.HISTORY_TRUNCATION_LEN
-    hist_tuple = hist_tuple[-_TRUNC:]
-    raw = f"{hero_pos}|{'_'.join(map(str, hist_tuple))}|{bucket}"
+    raw = (f"{hero_pos}|{nr}|{facing}|{n_live}|{committed}"
+           f"|{last_aggr}|{bucket}")
     return _pf_fnv1a(raw.encode())
 
 
 # Preflop table applicability: only use when near canonical 100bb 6-max config
 _PF_STACK_TOL = 0.25   # allow stacks within ±25% of 100bb
 
+# Must match preflop_cfr/export.py KEY_VERSION. A table tagged with any other
+# (or no) key_version was trained with a different info-set key encoding than
+# _preflop_infoset_key above, so its keys would never match — refuse it and fall
+# back to the heuristic rather than silently querying the wrong rows.
+_PF_KEY_VERSION = "betting_context_v1"
+
 if _USE_PREFLOP_TABLE:
     try:
         _pf_data = np.load(_PREFLOP_TABLE_PATH)
         _pf_n_players = int(_pf_data["n_players"])
         _pf_stack_bb  = int(_pf_data["stack_bb"])
-        if _pf_n_players == _N_PLAYERS and _pf_stack_bb == _INITIAL_STACK // _BIG_BLIND:
+        _pf_kv = str(_pf_data["key_version"]) if "key_version" in _pf_data \
+            else "legacy"
+        if (_pf_kv == _PF_KEY_VERSION
+                and _pf_n_players == _N_PLAYERS
+                and _pf_stack_bb == _INITIAL_STACK // _BIG_BLIND):
             _pf_keys = _pf_data["keys"]
             _pf_strat = _pf_data["strategy"]
             _PREFLOP_TABLE = {int(k): _pf_strat[i] for i, k in enumerate(_pf_keys)}
@@ -911,6 +935,11 @@ _RANK_ORDER = {r: i for i, r in enumerate(RANKS)}   # '2'->0 .. 'A'->12
 _CHEN_BASE  = {"A": 10.0, "K": 8.0, "Q": 7.0, "J": 6.0, "T": 5.0, "9": 4.5,
                "8": 4.0, "7": 3.5, "6": 3.0, "5": 2.5, "4": 2.0, "3": 1.5, "2": 1.0}
 _PREMIUM_3BET = {"AA", "KK", "QQ", "AKs", "AKo"}   # always 3-bet / 4-bet-jam core
+# Hands strong enough to stack off a short (<=35bb) effective stack over a raise.
+# The rest of the 3-bet range (suited wheels, suited connectors) is bluff/semi-
+# bluff that only gets called by stronger hands at this depth, so jamming it is
+# the single biggest bust source — see _preflop_decide's shallow-jam branch.
+_SHALLOW_JAM_VALUE = _PREMIUM_3BET | {"JJ", "TT", "AQs", "AQo", "AJs", "KQs"}
 
 # Open-raise Chen thresholds by position; lower = wider.
 # Used only as a fallback (BB iso-raises, profile-driven widening) when a
@@ -1156,9 +1185,17 @@ def _preflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0)) -> dict:
     want_reraise = label in _PREMIUM_3BET or (not facing_3bet and label in threebet_set)
 
     if want_reraise:
-        # Shallow (≤ 35 bb eff): we're committed — jam the premium/3-bet core.
+        # Shallow (≤ 35 bb eff): jam only the value core. The rest of the 3-bet
+        # range is bluff/semi-bluff that only gets called by stronger hands at
+        # this depth, so stacking it off 35 bb is the biggest single drawdown
+        # leak. 3-bet small with it when cheap and facing a single open, else
+        # give up rather than commit light.
         if eff_bb <= 35:
-            return {"action": "all_in"}
+            if label in _SHALLOW_JAM_VALUE:
+                return {"action": "all_in"}
+            if not facing_3bet and owed <= pot * 0.5:
+                return _raise_to_amount(gs, round(cur * 2.5))
+            return {"action": "fold"}
 
         # Deep, facing a single open: 3-bet (value + chart bluffs) to a size.
         if not facing_3bet:
@@ -2201,10 +2238,17 @@ def decide(game_state: dict) -> dict:
 
     try:
         if game_state.get("street", "preflop") == "preflop":
-            # Chart-derived heuristic preflop policy. The trained CFR table is
-            # left loaded but unused: at 400k traversals over ~4.9M info sets it
-            # never converged and open-jams premiums at 100bb. Re-enable via
-            # _preflop_table_decide() once the table is retrained to convergence.
+            # Preflop policy. The trained CFR table never converged, so as a
+            # temporary substitution we ship a *rudimentary* chart-derived table
+            # (preflop_cfr/gen_rudimentary.py) whose keys match this bot's
+            # encoding. Consult it first; it returns None when the live spot is
+            # out of the ~100bb 6-max scope or absent from the table, in which
+            # case we fall back to the in-bot chart/Chen heuristic (which also
+            # covers short-stack jam lines the table omits).
+            if _USE_PREFLOP_TABLE:
+                table_act = _preflop_table_decide(game_state)
+                if table_act is not None:
+                    return table_act
             return _preflop_decide(game_state, profile_counts)
         # Postflop: net or MC engine, behind the equity risk gate.
         return _postflop_decide(game_state, profile_counts, profiles)
