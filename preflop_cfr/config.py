@@ -97,6 +97,16 @@ SYNC_EVERY         = 1_000_000
 # PREFLOP_MEM_BUDGET_GB env var or the --mem-budget-gb CLI flag.
 MEM_BUDGET_GB      = float(os.environ.get("PREFLOP_MEM_BUDGET_GB", "6"))
 
+# ── Shared-memory parallel mode ────────────────────────────────────────────────
+# Number of open-addressing slots for the shared hash table.  Must exceed the
+# expected info-set count by at least 2× (load factor ≤ 0.5).  The 5-action
+# 2-raise tree reaches ~2-4M info sets, so 8M slots gives a comfortable margin.
+# Each slot consumes 9×8 + 9×4 + 8 + 8 = 124 bytes → 8M slots ≈ 992 MB total.
+# Windows commits shared memory to the page file lazily (on access), so the
+# physical-RAM footprint grows with the actual info-set count, not the capacity.
+# Reduce to 4_000_000 on a machine with less than 6 GB free RAM.
+SHARED_TABLE_CAPACITY = int(os.environ.get("PREFLOP_SHARED_CAPACITY", "8000000"))
+
 # ── Equity tables ──────────────────────────────────────────────────────────────
 HU_EQUITY_BOARDS    = 2_000    # MC boards for 169×169 HU table build
 # MC boards per multiway (3+-player) leaf rollout.  Lowered 400→250: these leaves

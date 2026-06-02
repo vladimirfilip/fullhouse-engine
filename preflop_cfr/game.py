@@ -10,7 +10,7 @@ Seat assignment: 0=dealer(BTN), 1=SB, 2=BB, 3=UTG, 4=HJ, 5=CO  (6-max)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import eval7
 
@@ -177,6 +177,100 @@ def legal_actions(state: PreflopState) -> list[int]:
         legal.append(config.ALL_IN)
 
     return legal
+
+
+# ── Mutable-state apply / undo (used by the shared-mem CFR path) ───────────────
+
+class UndoRecord(NamedTuple):
+    """Minimal snapshot to reverse one apply_action_inplace call."""
+    seat:            int
+    old_stack:       int
+    old_bet:         int
+    old_total_inv:   int
+    old_pot:         int
+    old_current_bet: int
+    old_folded:      bool
+    old_all_in:      bool
+    old_n_raises:    int
+    old_min_raise:   int
+    old_to_act:      int
+    old_needs_to_act: frozenset   # restored as set() on undo
+
+
+def apply_action_inplace(state: PreflopState, action_idx: int) -> UndoRecord:
+    """
+    Apply action_idx to state **in place** and return an UndoRecord.
+
+    Cheaper than apply_action (no dataclass clone) for the shared-mem
+    traversal path where _traverse_shared calls undo_action on the way
+    back up.  The public apply_action is unchanged for the dict-based path.
+    """
+    seat = state.to_act
+    undo = UndoRecord(
+        seat            = seat,
+        old_stack       = state.stacks[seat],
+        old_bet         = state.bets[seat],
+        old_total_inv   = state.total_inv[seat],
+        old_pot         = state.pot,
+        old_current_bet = state.current_bet,
+        old_folded      = state.folded[seat],
+        old_all_in      = state.all_in[seat],
+        old_n_raises    = state.n_raises,
+        old_min_raise   = state.min_raise,
+        old_to_act      = state.to_act,
+        old_needs_to_act = frozenset(state.needs_to_act),
+    )
+    owed = state.owed(seat)
+    state.needs_to_act.discard(seat)
+
+    if action_idx == config.FOLD:
+        state.folded[seat] = True
+
+    elif action_idx == config.CHECK_CALL:
+        if owed > 0:
+            paid = min(owed, state.stacks[seat])
+            _put_in(state, seat, paid)
+            if state.stacks[seat] == 0:
+                state.all_in[seat] = True
+
+    else:
+        target   = _abstract_to_chips(action_idx, state.bets[seat],
+                                      state.stacks[seat], state.pot,
+                                      state.current_bet, state.min_raise)
+        old_cb   = state.current_bet
+        chips_in = target - state.bets[seat]
+        _put_in(state, seat, chips_in)
+        if state.stacks[seat] == 0:
+            state.all_in[seat] = True
+        raise_size = state.current_bet - old_cb
+        if raise_size >= state.min_raise:
+            state.n_raises += 1
+            state.min_raise = max(raise_size, config.BIG_BLIND)
+            state.needs_to_act = {
+                i for i in range(state.n_players)
+                if state.is_active(i) and i != seat
+            }
+
+    state.history.append((seat, action_idx))
+    state.to_act = _next_to_act(state)
+    return undo
+
+
+def undo_action(state: PreflopState, undo: UndoRecord) -> None:
+    """Reverse the most recent apply_action_inplace call."""
+    seat = undo.seat
+    state.stacks[seat]    = undo.old_stack
+    state.bets[seat]      = undo.old_bet
+    state.total_inv[seat] = undo.old_total_inv
+    state.pot             = undo.old_pot
+    state.current_bet     = undo.old_current_bet
+    state.folded[seat]    = undo.old_folded
+    state.all_in[seat]    = undo.old_all_in
+    state.n_raises        = undo.old_n_raises
+    state.min_raise       = undo.old_min_raise
+    state.to_act          = undo.old_to_act
+    state.needs_to_act    = set(undo.old_needs_to_act)
+    state.history.pop()
 
 
 # ── Apply action ───────────────────────────────────────────────────────────────

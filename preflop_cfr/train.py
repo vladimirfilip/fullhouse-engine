@@ -41,11 +41,12 @@ import time
 import numpy as np
 
 from preflop_cfr import config
-from preflop_cfr.cfr import run_iteration
+from preflop_cfr.cfr import run_iteration, run_iteration_shared
 from preflop_cfr.equity import get_hu_table
 from preflop_cfr.export import (
     export_strategy, save_checkpoint, load_checkpoint,
 )
+from preflop_cfr.shared_table import SharedHashTable
 
 N_PLAYERS = config.N_PLAYERS
 
@@ -163,6 +164,38 @@ def _worker_delta(args: tuple) -> tuple[dict, dict]:
     return local_r, local_s, local_v
 
 
+# ── Shared-memory parallel workers ───────────────────────────────────────────
+
+# Process-global handle, attached once by _worker_init_shared.
+_g_shared_table = None
+
+
+def _worker_init_shared(name_prefix: str, capacity: int,
+                        insert_lock: mp.Lock) -> None:
+    """Pool initializer for shared-mem mode: attach table + pre-load HU equity."""
+    global _g_shared_table
+    get_hu_table()
+    _g_shared_table = SharedHashTable.attach(name_prefix, capacity, insert_lock)
+
+
+def _worker_run_shared(args: tuple) -> None:
+    """
+    Run a chunk of ES-MCCFR traversals writing directly into the shared table.
+
+    Workers return None — no delta to pickle or merge.  The main process reads
+    the table only at checkpoint time via SharedHashTable.to_dicts().
+    """
+    n_iters, seed, base_t = args
+    random.seed(seed)
+    np.random.seed(seed & 0xFFFFFFFF)
+    randrange = random.randrange
+    table     = _g_shared_table
+    for i in range(n_iters):
+        t = base_t + i
+        run_iteration_shared(t % N_PLAYERS, table, float(t + 1),
+                             dealer_seat=randrange(N_PLAYERS))
+
+
 def _table_nbytes(table: dict[int, np.ndarray]) -> int:
     """
     Rough resident size of an info-set table in bytes (array data + Python
@@ -208,13 +241,14 @@ def _split(total: int, parts: int) -> list[int]:
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(
-    total_iters:      int  = config.ITERATIONS,
-    n_workers:        int  = 1,
-    checkpoint_every: int  = config.CHECKPOINT_EVERY,
-    sync_every:       int  = config.SYNC_EVERY,
-    resume:           bool = False,
-    verbose:          bool = True,
+    total_iters:      int   = config.ITERATIONS,
+    n_workers:        int   = 1,
+    checkpoint_every: int   = config.CHECKPOINT_EVERY,
+    sync_every:       int   = config.SYNC_EVERY,
+    resume:           bool  = False,
+    verbose:          bool  = True,
     mem_budget_gb:    float = config.MEM_BUDGET_GB,
+    use_shared_mem:   bool  = True,
 ):
     regret_sum:   dict[int, np.ndarray] = {}
     strategy_sum: dict[int, np.ndarray] = {}
@@ -234,37 +268,77 @@ def train(
     if verbose:
         print("[preflop_cfr] HU table ready.", flush=True)
 
-    pool = None
-    if n_workers > 1:
-        pool = mp.Pool(processes=n_workers, initializer=_worker_init)
+    pool        = None
+    shared_table = None
 
-    # Round size: a checkpoint interval single-process; a (smaller) sync interval
-    # in parallel mode to bound worker divergence between merges.
-    round_iters = checkpoint_every if pool is None else min(sync_every,
-                                                            checkpoint_every)
-    next_ckpt = (iter_done // checkpoint_every + 1) * checkpoint_every
+    if n_workers > 1 and use_shared_mem:
+        # ── Shared-memory Hogwild path ─────────────────────────────────────
+        capacity    = config.SHARED_TABLE_CAPACITY
+        insert_lock = mp.Lock()
+        shared_table = SharedHashTable.create(capacity, insert_lock)
+        if regret_sum:   # resume: bulk-load checkpoint into shared memory
+            if verbose:
+                print(f"[preflop_cfr] Loading {len(regret_sum):,} info sets "
+                      f"into shared table (capacity={capacity:,})...",
+                      flush=True)
+            shared_table.from_dicts(regret_sum, strategy_sum, visit_sum)
+        pool = mp.Pool(processes=n_workers,
+                       initializer=_worker_init_shared,
+                       initargs=(shared_table.name_prefix,
+                                 capacity, insert_lock))
+        # No sync needed — workers write directly; run full checkpoint chunks.
+        round_iters = checkpoint_every
+        if verbose:
+            r_mb = capacity * 9 * 8 / 1e6
+            s_mb = capacity * 9 * 4 / 1e6
+            print(f"[preflop_cfr] Shared-mem mode: {n_workers} workers  "
+                  f"capacity={capacity:,} slots  "
+                  f"regrets={r_mb:.0f} MB  strategy={s_mb:.0f} MB",
+                  flush=True)
+
+    elif n_workers > 1:
+        # ── Legacy delta-merge path ────────────────────────────────────────
+        pool = mp.Pool(processes=n_workers, initializer=_worker_init)
+        round_iters = min(sync_every, checkpoint_every)
+
+    else:
+        # ── Single-process path ────────────────────────────────────────────
+        round_iters = checkpoint_every
+
+    next_ckpt    = (iter_done // checkpoint_every + 1) * checkpoint_every
     prev_premium: dict[str, np.ndarray] | None = None
-    stable_ckpts = 0   # consecutive checkpoints with premium drift < eps
-    t0 = time.time()
+    stable_ckpts = 0
+    t0           = time.time()
 
     try:
         while iter_done < total_iters:
             n = min(round_iters, total_iters - iter_done)
 
-            if pool is None:
-                _run_chunk(n, regret_sum, strategy_sum, visit_sum, iter_done)
-            else:
-                # Cap concurrent workers to the live table size so peak RAM
-                # stays under budget — the tables grow over the run, so this
-                # scales down automatically and prevents the OOM-kill.
+            if pool is not None and shared_table is not None:
+                # Shared-mem: dispatch chunks, workers return None.
+                counts  = [c for c in _split(n, n_workers) if c > 0]
+                base_ts: list[int] = []
+                acc = iter_done
+                for c in counts:
+                    base_ts.append(acc)
+                    acc += c
+                tasks = [(c, random.randrange(2**31), bt)
+                         for c, bt in zip(counts, base_ts)]
+                pool.map(_worker_run_shared, tasks)
+                iter_done += n
+                # Snapshot shared arrays into dicts for checkpoint + convergence.
+                regret_sum, strategy_sum, visit_sum = shared_table.to_dicts()
+
+            elif pool is not None:
+                # Legacy delta-merge: cap workers by RAM budget.
                 safe = _safe_workers(n_workers, regret_sum, mem_budget_gb)
                 if verbose and safe < n_workers:
-                    print(f"[preflop_cfr] table ~{_table_nbytes(regret_sum)/1e6:.0f}MB"
-                          f"  -> capping workers {n_workers}->{safe} "
-                          f"(budget {mem_budget_gb:g}GB)", flush=True)
+                    print(
+                        f"[preflop_cfr] table "
+                        f"~{_table_nbytes(regret_sum)/1e6:.0f}MB"
+                        f"  -> capping workers {n_workers}->{safe} "
+                        f"(budget {mem_budget_gb:g}GB)", flush=True)
                 counts = [c for c in _split(n, safe) if c > 0]
-                # Each worker warm-starts its linear-CFR weight from the global
-                # iter_done so weights stay monotonic across the whole run.
                 tasks  = [(c, random.randrange(2**31), regret_sum, iter_done)
                           for c in counts]
                 touched: set[int] = set()
@@ -273,38 +347,35 @@ def train(
                     _merge(strategy_sum, ds)
                     _merge_scalar(visit_sum, dv)
                     touched.update(dr.keys())
-                # Restore the RM+ floor after summing independently-floored
-                # per-worker regret deltas (see _floor_regrets).  Only rows a
-                # delta touched this round can have gone negative, so floor just
-                # those — O(touched) instead of O(table).
                 _floor_regrets(regret_sum, touched)
                 del tasks
+                iter_done += n
 
-            iter_done += n
+            else:
+                _run_chunk(n, regret_sum, strategy_sum, visit_sum, iter_done)
+                iter_done += n
+
             elapsed = time.time() - t0
             rate    = iter_done / max(elapsed, 1e-6)
             if verbose:
+                n_sets = (shared_table.n_info_sets()
+                          if shared_table is not None else len(strategy_sum))
                 print(f"[preflop_cfr] iter={iter_done}/{total_iters}  "
-                      f"info_sets={len(strategy_sum):,}  "
+                      f"info_sets={n_sets:,}  "
                       f"{rate:.0f} iter/s  elapsed={elapsed:.1f}s", flush=True)
 
             if iter_done >= next_ckpt or iter_done >= total_iters:
                 save_checkpoint(regret_sum, strategy_sum, visit_sum, iter_done)
                 next_ckpt += checkpoint_every
 
-                # Convergence gate (runs regardless of verbosity): track how much
-                # the premium UTG-open mix has moved since the last checkpoint.
                 cur_premium = _premium_snapshot(strategy_sum)
                 drift = _max_premium_drift(prev_premium, cur_premium)
 
-                # Broad-coverage guard: the premium-drift gate alone shipped a
-                # diffuse table last time (premiums settle long before the rest
-                # of the tree is visited).  Only let the gate fire once most kept
-                # info sets have cleared the visit target too.
                 if visit_sum:
                     _vc = np.fromiter(visit_sum.values(), dtype=np.float64,
                                       count=len(visit_sum))
-                    met_frac = float((_vc >= config.TARGET_VISITS_PER_SET).mean())
+                    met_frac = float(
+                        (_vc >= config.TARGET_VISITS_PER_SET).mean())
                 else:
                     met_frac = 0.0
 
@@ -316,34 +387,45 @@ def train(
 
                 prev_premium = cur_premium
 
-                if (drift is not None and drift < config.CONVERGENCE_DRIFT_EPS
+                if (drift is not None
+                        and drift < config.CONVERGENCE_DRIFT_EPS
                         and met_frac >= config.CONVERGENCE_MIN_MET_FRAC):
                     stable_ckpts += 1
                     if verbose:
                         print(f"[preflop_cfr] premium drift {drift:.4f} < eps "
                               f"{config.CONVERGENCE_DRIFT_EPS} "
-                              f"({stable_ckpts}/{config.CONVERGENCE_PATIENCE})",
+                              f"({stable_ckpts}/"
+                              f"{config.CONVERGENCE_PATIENCE})",
                               flush=True)
                     if stable_ckpts >= config.CONVERGENCE_PATIENCE:
                         print(f"[preflop_cfr] Converged: premium drift below "
                               f"{config.CONVERGENCE_DRIFT_EPS} for "
-                              f"{stable_ckpts} consecutive checkpoints at iter "
-                              f"{iter_done}. Stopping early.", flush=True)
+                              f"{stable_ckpts} consecutive checkpoints at "
+                              f"iter {iter_done}. Stopping early.", flush=True)
                         break
                 else:
                     if drift is not None and verbose:
-                        why = ("met_frac %.2f < %.2f" %
-                               (met_frac, config.CONVERGENCE_MIN_MET_FRAC)
-                               if drift < config.CONVERGENCE_DRIFT_EPS
-                               else "drift >= eps %.3f" % config.CONVERGENCE_DRIFT_EPS)
+                        why = (
+                            "met_frac %.2f < %.2f" % (
+                                met_frac, config.CONVERGENCE_MIN_MET_FRAC)
+                            if drift < config.CONVERGENCE_DRIFT_EPS
+                            else "drift >= eps %.3f" %
+                            config.CONVERGENCE_DRIFT_EPS)
                         print(f"[preflop_cfr] no early-stop ({why}); "
                               f"streak reset  [drift={drift:.4f} "
                               f"met_frac={met_frac:.2f}]", flush=True)
                     stable_ckpts = 0
+
     finally:
         if pool is not None:
             pool.close()
             pool.join()
+        if shared_table is not None:
+            try:
+                shared_table.close()
+                shared_table.unlink()
+            except Exception:
+                pass
 
     n_exported = export_strategy(strategy_sum, visit_sum)
     if verbose:
@@ -533,6 +615,13 @@ if __name__ == "__main__":
                              "workers as tables grow (default: %(default)g, "
                              "or $PREFLOP_MEM_BUDGET_GB)")
     parser.add_argument("--quiet",   action="store_true")
+    parser.add_argument("--shared-mem", dest="shared_mem",
+                        action="store_true", default=True,
+                        help="Hogwild shared-memory parallel CFR (default "
+                             "when --workers > 1)")
+    parser.add_argument("--no-shared-mem", dest="shared_mem",
+                        action="store_false",
+                        help="Legacy delta-merge parallel CFR")
     args = parser.parse_args()
 
     n_iters = config.QUICK_ITERATIONS if args.quick else (args.iters or config.ITERATIONS)
@@ -545,4 +634,5 @@ if __name__ == "__main__":
         resume           = args.resume,
         verbose          = not args.quiet,
         mem_budget_gb    = args.mem_budget_gb,
+        use_shared_mem   = args.shared_mem,
     )

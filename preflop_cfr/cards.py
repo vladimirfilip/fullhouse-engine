@@ -32,20 +32,14 @@ def _card_str(c) -> str:
     return str(c)
 
 
-def hand_to_bucket(c1, c2) -> int:
-    """
-    Map two hole cards to a 0..168 bucket index.
-
-    Invariant: hand_to_bucket(c1, c2) == hand_to_bucket(c2, c1) for all suits.
-    Suit isomorphism: only the suited/offsuit flag matters, not which suits.
-    """
+def _hand_to_bucket_compute(c1, c2) -> int:
+    """Core bucket computation (used at import time to build _BUCKET_LUT)."""
     s1, s2 = _card_str(c1), _card_str(c2)
     r1, r2 = _CARD_RANK[s1], _CARD_RANK[s2]
     suited = (_CARD_SUIT[s1] == _CARD_SUIT[s2])
     hi, lo = (r1, r2) if r1 >= r2 else (r2, r1)
 
     if hi == lo:
-        # pair: AA→0, KK→1, ... 22→12
         return 12 - hi
 
     # non-pair: enumerate high-rank-major, and within each hi block lo DESCENDING
@@ -57,11 +51,8 @@ def hand_to_bucket(c1, c2) -> int:
     # block start = number of non-pair combos with high rank > hi
     #   sum_{r=hi+1}^{12} r = (12*(12+1)//2) - (hi*(hi+1)//2) = 78 - hi*(hi+1)//2
     # position within the block, lo descending = (hi-1) - lo
-    offset = (78 - hi * (hi + 1) // 2) + (hi - 1 - lo)  # 0-based within the block
-    if suited:
-        return 13 + offset
-    else:
-        return 91 + offset
+    offset = (78 - hi * (hi + 1) // 2) + (hi - 1 - lo)
+    return (13 + offset) if suited else (91 + offset)
 
 
 # ── Inverse map: bucket → (hi_rank, lo_rank, suited) ─────────────────────────
@@ -90,6 +81,31 @@ BUCKET_INFO: list[tuple[int, int, bool]] = _build_bucket_info()
 ALL_CARDS: list[eval7.Card] = [
     eval7.Card(r + s) for r in RANKS for s in SUITS
 ]
+
+
+# ── O(1) bucket LUT: (str(c1), str(c2)) -> bucket ────────────────────────────
+# Pre-compute all 1326 two-card combinations at import time so hand_to_bucket
+# reduces to a single dict lookup at traversal time (vs. 3 dict lookups +
+# branch + arithmetic per call).  Both orderings are stored so no sorting is
+# needed at query time.
+_BUCKET_LUT: dict[tuple[str, str], int] = {}
+for _c1 in ALL_CARDS:
+    for _c2 in ALL_CARDS:
+        _s1, _s2 = str(_c1), str(_c2)
+        if _s1 > _s2:          # skip; the _s1<_s2 pass will cover both orderings
+            continue
+        _b = _hand_to_bucket_compute(_c1, _c2)
+        _BUCKET_LUT[(_s1, _s2)] = _b
+        _BUCKET_LUT[(_s2, _s1)] = _b   # both orderings stored; self-pair has one
+
+
+def hand_to_bucket(c1, c2) -> int:
+    """
+    Map two hole cards to a 0..168 bucket index (O(1) LUT lookup).
+
+    Invariant: hand_to_bucket(c1, c2) == hand_to_bucket(c2, c1) for all suits.
+    """
+    return _BUCKET_LUT[(str(c1), str(c2))]
 
 
 def fresh_deck() -> list[eval7.Card]:

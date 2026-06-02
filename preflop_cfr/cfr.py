@@ -50,7 +50,9 @@ from preflop_cfr.abstraction import infoset_key
 from preflop_cfr.game import (
     PreflopState, make_initial_state, is_terminal,
     terminal_utilities, legal_actions, apply_action,
+    apply_action_inplace, undo_action,
 )
+from preflop_cfr.shared_table import SharedHashTable
 
 N_PLAYERS = config.N_PLAYERS
 
@@ -218,3 +220,105 @@ def run_iteration(
     buckets = [hand_to_bucket(h[0], h[1]) for h in state.hands]
     return _traverse(state, traverser, regret_sum, strategy_sum, visit_sum,
                      buckets, weight, regret_base)
+
+
+# ── Shared-memory parallel path ────────────────────────────────────────────────
+
+def _strategy_over_legal_vec(regrets: np.ndarray,
+                             legal: list[int]) -> np.ndarray:
+    """
+    Regret-matched probabilities over legal actions as a numpy array.
+
+    Uses fancy indexing (returns a copy) so the caller can modify the result
+    without touching the shared regret view.  The ReLU floor handles the rare
+    case where a concurrent Hogwild write temporarily drives a cell negative.
+    """
+    raw = np.maximum(0.0, regrets[legal])   # fancy index → copy, then ReLU
+    s   = float(raw.sum())
+    if s > 0.0:
+        raw *= (1.0 / s)
+    else:
+        raw[:] = 1.0 / len(legal)
+    return raw
+
+
+def _traverse_shared(
+    state:     PreflopState,
+    traverser: int,
+    table:     SharedHashTable,
+    buckets:   list[int],
+    weight:    float,
+) -> float:
+    """
+    ES-MCCFR (CFR+) traversal over a mutable PreflopState using a SharedHashTable.
+
+    Differences from _traverse:
+    * apply_action_inplace + undo_action replace the per-node dataclass clone.
+    * table.find_or_insert replaces _get_or_init dict lookups.
+    * Regret and strategy updates go directly into shared numpy views (Hogwild).
+    * _strategy_over_legal_vec returns a numpy copy so probs are snapshot-stable
+      even if another worker modifies the underlying regret row mid-traversal.
+    """
+    if is_terminal(state) or state.to_act == -1:
+        return terminal_utilities(state)[traverser]
+
+    seat  = state.to_act
+    legal = legal_actions(state)
+    key   = _infoset_key(seat, state.dealer_seat, state.history, buckets[seat])
+    idx   = table.find_or_insert(key)
+
+    regrets = table.regrets[idx]                         # float64[9] shared view
+    probs   = _strategy_over_legal_vec(regrets, legal)   # numpy copy
+
+    if seat != traverser:
+        s_view = table.strategy[idx]                     # float32[9] shared view
+        for i, a in enumerate(legal):
+            s_view[a] += weight * float(probs[i])
+        table.visits[idx] += 1.0
+
+        # Manual inverse-CDF sample (no np.random.choice allocation).
+        r   = random.random()
+        cum = 0.0
+        chosen = legal[-1]
+        for i, a in enumerate(legal):
+            cum += float(probs[i])
+            if r <= cum:
+                chosen = a
+                break
+        undo = apply_action_inplace(state, chosen)
+        ev   = _traverse_shared(state, traverser, table, buckets, weight)
+        undo_action(state, undo)
+        return ev
+
+    # Traverser node: enumerate all legal actions with undo.
+    action_evs: list[float] = []
+    for a in legal:
+        undo = apply_action_inplace(state, a)
+        action_evs.append(
+            _traverse_shared(state, traverser, table, buckets, weight))
+        undo_action(state, undo)
+
+    node_ev = sum(float(probs[i]) * action_evs[i] for i in range(len(legal)))
+    for i, a in enumerate(legal):
+        v          = float(regrets[a]) + (action_evs[i] - node_ev)
+        regrets[a] = v if v > 0.0 else 0.0
+    return node_ev
+
+
+def run_iteration_shared(
+    traverser:   int,
+    table:       SharedHashTable,
+    weight:      float,
+    dealer_seat: int = 0,
+) -> float:
+    """
+    Run one ES-MCCFR (CFR+) traversal writing directly into `table` (Hogwild).
+
+    Drop-in replacement for run_iteration in parallel shared-memory mode.
+    No regret_base warm-start is needed because all workers read from and
+    write to the same physical pages.
+    """
+    deck    = random.sample(ALL_CARDS, 2 * config.N_PLAYERS)
+    state   = make_initial_state(dealer_seat=dealer_seat, deck=deck)
+    buckets = [hand_to_bucket(h[0], h[1]) for h in state.hands]
+    return _traverse_shared(state, traverser, table, buckets, weight)
