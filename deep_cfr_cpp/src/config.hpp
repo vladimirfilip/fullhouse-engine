@@ -27,20 +27,25 @@ constexpr int BIG_BLIND    = 100;
 // (24 slots × 6 floats). See features.cpp for the exact layout — must match
 // _build_feature_vector in bots/vlad/bot.py byte-for-byte.
 constexpr int INPUT_DIM    = 308;
-constexpr int HIDDEN_DIM   = 512;
-constexpr int N_LAYERS     = 4;   // hidden layers
+// 3×256 net: shrunk from 4×512 to cut the per-node data-gen forward cost (the
+// CPU bottleneck). HIDDEN_DIM/N_LAYERS are read by make_net() + forward_single,
+// so changing them DOES require rebuilding the extension (make build-cpp).
+constexpr int HIDDEN_DIM   = 256;
+constexpr int N_LAYERS     = 3;   // hidden layers
 
 // Memory buffers
-constexpr int REGRET_BUF_CAP   = 4'000'000;
-constexpr int STRATEGY_BUF_CAP = 4'000'000;
+constexpr int REGRET_BUF_CAP   = 8'000'000;
+constexpr int STRATEGY_BUF_CAP = 8'000'000;
 
-// Training loop
-constexpr int   K_ITERATIONS      = 100;
-constexpr int   GAMES_PER_ITER    = 10'000;
-constexpr int   BATCH_SIZE        = 4'096;
-constexpr float LR                = 1e-3f;
-constexpr int   REGRET_TRAIN_STEPS   = 5'000;   // ~5 passes over 4M buffer
-constexpr int   STRATEGY_TRAIN_STEPS = 15'000;  // ~15 passes; runs once, is the exported model
+// Training loop. NOTE: these are NOT read at runtime — train.py owns the loop
+// and passes its own values from deep_cfr/config.py. They are kept in sync here
+// only so the C++ header isn't a stale source of truth for anyone reading it.
+constexpr int   K_ITERATIONS      = 600;
+constexpr int   GAMES_PER_ITER    = 25'000;
+constexpr int   BATCH_SIZE        = 16'384;
+constexpr float LR                = 2e-3f;
+constexpr int   REGRET_TRAIN_STEPS   = 2'500;   // ~5 passes over the 8M buffer
+constexpr int   STRATEGY_TRAIN_STEPS = 12'500;  // runs once; is the exported model
 
 // Network
 constexpr float LEAKY_ALPHA = 0.01f;

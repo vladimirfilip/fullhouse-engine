@@ -57,21 +57,28 @@ INPUT_DIM  = 308
 # MAX_RAISES_PER_STREET in deep_cfr_cpp/src/config.hpp and
 # _MAX_RAISES_PER_STREET in bots/vlad/bot.py (see config.hpp for the trade-off).
 MAX_RAISES_PER_STREET = 4
-HIDDEN_DIM = 512
-N_LAYERS   = 4     # hidden layers
+# 3×256 (~180k params) instead of 4×512 (~1M): the smaller net cuts the
+# per-node forward cost in the C++ data-gen path (the CPU bottleneck) ~3–4× and
+# generalises better on the data a ~30 h run produces. MUST match HIDDEN_DIM /
+# N_LAYERS in deep_cfr_cpp/src/config.hpp (rebuild the extension after changing)
+# — bot.py infers both from the .npz weight shapes, so it needs no edit.
+HIDDEN_DIM = 256
+N_LAYERS   = 3     # hidden layers
 
 # ── Memory buffers ─────────────────────────────────────────────────────────
-# 8M cap: saturates around iter 160 at 50k games/iter (8M / ~50 samples/game).
-# Keeps the most recent, highest-weight samples in the reservoir.
+# 8M cap: at 25k games/iter the reservoir saturates around iter 320; past that
+# it keeps the most recent, highest-weight (DCFR-discounted) samples.
 REGRET_BUF_CAP   = 8_000_000
 STRATEGY_BUF_CAP = 8_000_000
 
 # ── Training loop ─────────────────────────────────────────────────────────
-# Target: 300 iters × 50k games = 15M traversals.  Estimated wall time on a
-# 16-core CPU + GPU VM: ~40–50 h.  Use --quick (5 iters × 200 games) to
-# smoke-test the build before committing to a full run.
-K_ITERATIONS      = 300
-GAMES_PER_ITER    = 50_000
+# Data-gen on CPU is the bottleneck (training runs on GPU), so the budget is
+# rebalanced toward more iterations with fewer games each: CFR converges through
+# the time-averaging across iterations, not raw samples per iteration. 600 × 25k
+# = 15M traversals — same total work as the old 300 × 50k but 2× the net refits
+# (averaging steps). Use --quick (5 iters × 200 games) to smoke-test the build.
+K_ITERATIONS      = 600
+GAMES_PER_ITER    = 25_000
 # Bigger batch better utilises the GPU on this tiny 4×512 MLP: at 4 096 the
 # per-step Python/transfer overhead dominated and GPU occupancy was low. 16 384
 # (4×) cuts step count for the same buffer coverage and raises occupancy. LR is

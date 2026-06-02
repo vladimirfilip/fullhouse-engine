@@ -225,6 +225,34 @@ def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
     return last_loss
 
 
+# ── Convergence yardstick ──────────────────────────────────────────────────
+
+@torch.no_grad()
+def _policy_on(net: nn.Module, states: np.ndarray,
+               device: torch.device) -> np.ndarray:
+    """Strategy-net policy over a fixed set of states → [B, N_ACTIONS] numpy.
+
+    The strategy net already applies softmax, so the rows are probabilities.
+    Restores the net's train/eval mode so callers can keep training it after.
+    """
+    was_training = net.training
+    net.eval()
+    out = net(torch.from_numpy(states).to(device)).detach().cpu().numpy()
+    if was_training:
+        net.train()
+    return out
+
+
+def _mean_tv(p: np.ndarray, q: np.ndarray) -> float:
+    """Mean total-variation distance between two [B, N_ACTIONS] policies.
+
+    TV = 0.5 · Σ|p−q| per row, averaged. 0 ⇒ identical policies; the maximum
+    of 1 ⇒ disjoint support. Tracked across strategy snapshots as a convergence
+    signal: TV → 0 means the averaged strategy has stopped moving.
+    """
+    return float(0.5 * np.abs(p - q).sum(axis=1).mean())
+
+
 # ── Main training loop ─────────────────────────────────────────────────────
 
 def train(
@@ -270,6 +298,13 @@ def train(
         if start_iter >= k_iterations:
             print(f"Checkpoint iteration {start_iter} >= target {k_iterations}; "
                   f"nothing to do. Raise --iters to continue training.")
+
+    # ── Convergence yardstick state ────────────────────────────────────────
+    # A validation batch is frozen at the first strategy snapshot; each later
+    # snapshot reports the mean TV distance of its policy from the previous
+    # snapshot's over that fixed set. Plateau near 0 ⇒ the strategy converged.
+    val_states: np.ndarray | None = None
+    prev_val_policy: np.ndarray | None = None
 
     for t in range(start_iter + 1, k_iterations + 1):
         t0 = time.perf_counter()
@@ -323,12 +358,35 @@ def train(
             snap_path = os.path.join(out_dir, MODEL_FILENAME + ".npz")
             export_net(snap_net, snap_path)
             print(f"  Strategy snapshot -> {os.path.abspath(snap_path)}")
+
+            # ── Yardstick: how far has the averaged strategy moved? ───────────
+            # Freeze the validation states on the first snapshot, then report
+            # mean TV vs the previous snapshot's policy on that same set.
+            if val_states is None:
+                vs = np.empty((BATCH_SIZE, INPUT_DIM), dtype=np.float32)
+                vt = np.empty((BATCH_SIZE, N_ACTIONS), dtype=np.float32)
+                vw = np.empty((BATCH_SIZE,),           dtype=np.float32)
+                kk = cpp_buffers.sample_strategy_into(vs, vt, vw)
+                val_states = vs[:kk].copy()
+            cur_pol = _policy_on(snap_net, val_states, device)
+            if prev_val_policy is not None:
+                tv = _mean_tv(cur_pol, prev_val_policy)
+                print(f"  [yardstick] strategy drift since last snapshot: "
+                      f"mean TV = {tv:.4f}")
+            prev_val_policy = cur_pol
             del snap_net
 
     # ── Final strategy net training ────────────────────────────────────────
     if cpp_buffers.strategy_ready(BATCH_SIZE):
         print(f"\nTraining strategy net ({STRATEGY_TRAIN_STEPS} steps)…")
         _train_strategy(strategy_net, cpp_buffers, STRATEGY_TRAIN_STEPS, device)
+        # Final yardstick reading: drift of the production net vs the last
+        # snapshot. A small value is the confirmation that 30 h was enough.
+        if val_states is not None and prev_val_policy is not None:
+            tv = _mean_tv(_policy_on(strategy_net, val_states, device),
+                          prev_val_policy)
+            print(f"[yardstick] final strategy drift vs last snapshot: "
+                  f"mean TV = {tv:.4f}")
     else:
         print("Strategy buffer too small; saving untrained strategy net.")
 

@@ -526,7 +526,18 @@ def _preflop_infoset_key(gs: dict) -> int:
             abstract = _CHECK_CALL
             bets[eseat]  = current_bet
             pot         += max(0, current_bet - bst)
-        elif act in ("raise", "all_in"):
+        elif act == "all_in":
+            # The engine tags every full-stack commit as "all_in" (it normalises
+            # full-stack "raise" to "all_in" too), so map directly to the ALL_IN
+            # token.  _pf_amount_to_abstract can only emit sized-raise indices, so
+            # routing a shove through it would mis-encode it as BET_FULL_POT and
+            # query the wrong info-set (the solver tree records ALL_IN as a
+            # distinct action — see preflop_cfr/abstraction.py).
+            abstract     = _ALL_IN
+            pot         += amt - bst
+            current_bet  = max(current_bet, amt)
+            bets[eseat]  = amt
+        elif act == "raise":
             abstract     = _pf_amount_to_abstract(amt, pot, current_bet, bst)
             pot         += amt - bst
             current_bet  = max(current_bet, amt)

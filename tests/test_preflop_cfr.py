@@ -165,6 +165,7 @@ class TestInfosetKeyParity:
         """Compute key via abstraction.py (the canonical source)."""
         from preflop_cfr.abstraction import infoset_key_from_log, amount_to_abstract
         from preflop_cfr.cards import hand_to_bucket
+        from preflop_cfr.config import ALL_IN
 
         al = action_log
         n  = 6
@@ -187,7 +188,10 @@ class TestInfosetKeyParity:
                 abstract = 0
             elif act in ("check", "call"):
                 abstract = 1; bets[eseat] = cur_bet; pot += max(0, cur_bet - bst)
-            elif act in ("raise", "all_in"):
+            elif act == "all_in":
+                abstract = ALL_IN
+                pot += amt - bst; cur_bet = max(cur_bet, amt); bets[eseat] = amt
+            elif act == "raise":
                 abstract = amount_to_abstract(amt, pot, cur_bet, bst)
                 pot += amt - bst; cur_bet = max(cur_bet, amt); bets[eseat] = amt
             else:
@@ -233,6 +237,35 @@ class TestInfosetKeyParity:
         ]
         cards = ["Ah", "Ad"]
         assert self._abstraction_key(cards, al, seat=2) == self._bot_key(cards, al, seat=2)
+
+    def test_all_in_parity(self):
+        """BB facing a UTG shove: abstraction.py and bot.py must agree, and the
+        shove must be encoded as the ALL_IN token (not a sized raise)."""
+        al = [
+            {"seat": 1, "action": "small_blind", "amount": 50},
+            {"seat": 2, "action": "big_blind",   "amount": 100},
+            {"seat": 3, "action": "all_in",       "amount": 10000},
+        ]
+        cards = ["Kh", "Kd"]
+        assert self._abstraction_key(cards, al, seat=2) == self._bot_key(cards, al, seat=2)
+
+    def test_all_in_distinct_from_sized_raise(self):
+        """A shove and a sized raise in the same spot must produce DIFFERENT
+        info-set keys.  Before the fix both were routed through amount_to_abstract
+        and collapsed onto BET_FULL_POT — colliding keys that mis-queried the
+        solved table (which records ALL_IN as a distinct action)."""
+        shove = [
+            {"seat": 1, "action": "small_blind", "amount": 50},
+            {"seat": 2, "action": "big_blind",   "amount": 100},
+            {"seat": 3, "action": "all_in",       "amount": 10000},
+        ]
+        sized = [
+            {"seat": 1, "action": "small_blind", "amount": 50},
+            {"seat": 2, "action": "big_blind",   "amount": 100},
+            {"seat": 3, "action": "raise",        "amount": 350},  # ~pot-sized open
+        ]
+        cards = ["Kh", "Kd"]
+        assert self._bot_key(cards, shove, seat=2) != self._bot_key(cards, sized, seat=2)
 
 
 # ── 4. Game mechanics ─────────────────────────────────────────────────────────

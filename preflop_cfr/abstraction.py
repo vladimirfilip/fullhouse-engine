@@ -41,9 +41,17 @@ def fnv1a_64(data: bytes) -> int:
 def amount_to_abstract(raise_to: int, pot: int, current_bet: int,
                         your_bet_this_street: int) -> int:
     """
-    Map a 'raise to X chips' amount to the closest PREFLOP_ACTIONS raise index.
-    Returns CHECK_CALL if the amount is <= current_bet (call/check situation).
-    Returns ALL_IN if the amount matches all-in.
+    Map a 'raise to X chips' amount to the closest *sized* PREFLOP_ACTIONS raise
+    index.  Returns CHECK_CALL if the amount is <= current_bet (call/check).
+
+    NOTE: this never returns ALL_IN — it only ranks the sized-raise fractions and
+    has no stack information to detect a shove.  The solver tree records ALL_IN as
+    a distinct action (game.legal_actions/apply_action), so callers replaying an
+    action log MUST map an "all_in" action straight to config.ALL_IN and only
+    route genuine "raise" actions through this function.  The engine normalises a
+    full-stack "raise" to an "all_in" action (engine/game.py:_validate), so the
+    action label alone is sufficient to tell them apart.  bot.py's mirror
+    (_pf_amount_to_abstract / _preflop_infoset_key) follows the same rule.
     """
     eff_pot = pot + max(0, current_bet - your_bet_this_street)
     if eff_pot <= 0:
