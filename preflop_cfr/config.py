@@ -51,18 +51,17 @@ MAX_RAISES_PREFLOP = 2
 HISTORY_TRUNCATION_LEN = 4
 
 # ── Training ───────────────────────────────────────────────────────────────────
-# With the coarse 4-action / 2-raise tree the reachable info-set count drops to
-# ~1e5 (vs ~4.9M before), so a full run can actually push average visits/set into
-# the thousands.  "Convergence" is judged by the diagnostics train.py prints each
-# checkpoint — visits/set histogram + premium-hand strategy drift — NOT by raw
-# iteration count.  Stop when TARGET_VISITS_PER_SET is broadly met and the
-# premium-hand drift between checkpoints has flattened.
-# Upper bound on traversals — a *safety ceiling*, not the real stop condition.
-# The convergence gate below stops the run as soon as the premium-hand strategy
-# has stopped drifting, which under CFR+ + the coarse tree happens well inside
-# this ceiling (≈7M traversals to hit TARGET_VISITS_PER_SET; ~7h at ~300 it/s on
-# 8 workers).  The ceiling just guarantees termination if the gate never trips.
-ITERATIONS         = 20_000_000  # ES-MCCFR traversal ceiling
+# "Convergence" is judged by the diagnostics train.py prints each checkpoint —
+# visits/set histogram + premium-hand strategy drift — NOT by raw iteration
+# count.  The ceiling below is a safety cap; the convergence gate stops the run
+# as soon as the drift gate fires.
+#
+# Budget estimate with HISTORY_TRUNCATION_LEN=4:
+#   ~400 visits/set × (observed info-set count) / ~3 opponent touches per iter
+#   = traversals for average convergence; 80th-percentile needs ~2× that.
+#   At ~2500 it/s (96-worker VM):  120M iters ≈ 13h  — fits in 16h for trees
+#   up to ~500k info sets.  The gate fires early for smaller trees.
+ITERATIONS         = 120_000_000  # ES-MCCFR traversal ceiling
 QUICK_ITERATIONS   = 5_000       # smoke-test run (--quick flag)
 CHECKPOINT_EVERY   = 1_000_000
 PRUNE_MIN_VISITS   = 40        # drop info sets visited < N times at export
