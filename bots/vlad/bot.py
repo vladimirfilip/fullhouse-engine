@@ -81,7 +81,7 @@ _USE_PREFLOP_TABLE = False
 # Postflop engine: "net" = trained GTO strategy net (balanced ranges), "mc" =
 # Monte-Carlo equity + pot-odds.  Toggle is read by _postflop_decide so the two
 # can be A/B-compared in a local tournament.  Overridable via env for sweeps.
-_POSTFLOP_ENGINE = os.environ.get("VLAD_POSTFLOP_ENGINE", "mc")
+_POSTFLOP_ENGINE = os.environ.get("VLAD_POSTFLOP_ENGINE", "net")
 
 # Risk gate: never commit more than this fraction of the effective stack on a
 # single street without clearing the street/commitment equity floor (see
@@ -384,7 +384,7 @@ def _numpy_forward(
 
 DATA_DIR   = os.environ.get("BOT_DATA_DIR",
              os.path.join(os.path.dirname(__file__), "data"))
-_MODEL_PATH = os.path.join(DATA_DIR, "better_gto", "gto_strategy.npz")
+_MODEL_PATH = os.path.join(DATA_DIR, "gto_strategy.npz")
 
 _GTO_LAYERS: list[tuple[np.ndarray, np.ndarray]] | None = None
 
