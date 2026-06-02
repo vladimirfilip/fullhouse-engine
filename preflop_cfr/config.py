@@ -43,6 +43,13 @@ PREFLOP_ACTIONS = [FOLD, CHECK_CALL, BET_THIRD_POT, BET_FULL_POT, ALL_IN]
 # (won't converge in 16h on the current solver), so 2 is the tractable sweet spot.
 MAX_RAISES_PREFLOP = 2
 
+# Info-set key history truncation: keep only the last N abstract actions.
+# Full histories explode to ~4.9M info sets (untrainable in 16h); truncating
+# to 4 collapses many distinct long sequences that share the same recent
+# betting context, targeting ~250k–500k info sets.  Must be mirrored in
+# bot.py (_preflop_infoset_key) and abstraction.py.
+HISTORY_TRUNCATION_LEN = 4
+
 # ── Training ───────────────────────────────────────────────────────────────────
 # With the coarse 4-action / 2-raise tree the reachable info-set count drops to
 # ~1e5 (vs ~4.9M before), so a full run can actually push average visits/set into

@@ -680,6 +680,8 @@ def _preflop_infoset_key(gs: dict) -> int:
         history.append((eseat, abstract))
 
     hist_tuple = tuple(a for _, a in history)
+    _TRUNC = 4  # must match preflop_cfr/config.HISTORY_TRUNCATION_LEN
+    hist_tuple = hist_tuple[-_TRUNC:]
     raw = f"{hero_pos}|{'_'.join(map(str, hist_tuple))}|{bucket}"
     return _pf_fnv1a(raw.encode())
 

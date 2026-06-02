@@ -96,7 +96,8 @@ def infoset_key(hero_position: int, history: tuple[int, ...], bucket: int) -> in
              from UTG's first action to the current decision point.
     bucket: 0..168 hand bucket from cards.hand_to_bucket.
     """
-    raw = f"{hero_position}|{'_'.join(map(str, history))}|{bucket}"
+    trunc = history[-config.HISTORY_TRUNCATION_LEN:]
+    raw = f"{hero_position}|{'_'.join(map(str, trunc))}|{bucket}"
     return fnv1a_64(raw.encode())
 
 

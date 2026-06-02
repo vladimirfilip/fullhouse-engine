@@ -108,7 +108,8 @@ def _infoset_key(seat: int, dealer_seat: int, history: list, bucket: int) -> int
     """Memoized 64-bit info-set key for (position-rel-dealer, history, bucket)."""
     hero_pos = (seat - dealer_seat) % N_PLAYERS
     hist     = tuple(a for _, a in history)
-    tk       = (hero_pos, hist, bucket)
+    trunc    = hist[-config.HISTORY_TRUNCATION_LEN:]
+    tk       = (hero_pos, trunc, bucket)  # cache on truncated key — fewer entries
     key = _KEY_CACHE.get(tk)
     if key is None:
         key = infoset_key(hero_pos, hist, bucket)
