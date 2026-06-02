@@ -100,6 +100,138 @@ _RAISE_LADDER = [
     (_2X,    lambda p: p * 2),
 ]
 
+# ── Equity clamp on the net path (Module D2) ────────────────────────────────
+# The net path computes an exact eval7 equity every action (_run_mc) but the
+# baseline only uses it to nudge fold<->call — the net owns sizing unchecked.
+# When the GTO net is undertrained it can fire oversized "value" bets with weak
+# hands, check the nuts, or over-call clear losers. These guards reuse the equity
+# that's already in hand to (1) cap bet/raise size by equity, (1b) floor
+# aggression with the nuts, (2) up-size value vs calling stations, (3) hard-fold
+# when equity is far below pot odds. Gated OFF by default so it can be A/B'd
+# against the current `net` behaviour; flip VLAD_EQUITY_CLAMP=1 to enable.
+_EQUITY_CLAMP          = _envf("VLAD_EQUITY_CLAMP", 0.0) >= 0.5
+# Hard-fold edge is READ-AWARE: the raw equity-vs-pot-odds edge below which we
+# fold outright. Looser (more negative => fold less) vs over-bluffers, tighter
+# (=> fold more) vs value-only lines, so the guard coheres with the Module D1
+# exploit shift and Module B range-conditioning instead of overriding them.
+_CLAMP_FOLD_EDGE        = _envf("VLAD_CLAMP_FOLD_EDGE", -0.15)         # normal/unknown
+_CLAMP_FOLD_EDGE_NIT    = _envf("VLAD_CLAMP_FOLD_EDGE_NIT", -0.08)     # nit/station: fold more
+_CLAMP_FOLD_EDGE_MANIAC = _envf("VLAD_CLAMP_FOLD_EDGE_MANIAC", -0.40)  # maniac: ~never hard-fold
+_CLAMP_VALUE_EQ        = _envf("VLAD_CLAMP_VALUE_EQ", 0.82)     # don't check hands this strong
+_CLAMP_STATION_EQ      = _envf("VLAD_CLAMP_STATION_EQ", 0.58)   # value floor for station up-sizing
+_CLAMP_STATION_UPSHIFT = _envf("VLAD_CLAMP_STATION_UPSHIFT", 0.40)
+
+# Approx pot-fraction each aggressive abstract action commits (all-in ~ uncapped).
+_ACTION_POT_FRAC = {
+    _0_27X: 0.27, _THIRD: 0.33, _HALF: 0.5, _FULL: 1.0,
+    _1_72X: 1.72, _2X: 2.0, _ALL_IN: 10.0,
+}
+# Aggressive actions in ascending size order.
+_BET_ORDER = [_0_27X, _THIRD, _HALF, _FULL, _1_72X, _2X, _ALL_IN]
+
+
+def _max_size_frac(equity: float) -> float:
+    """Largest pot-fraction bet/raise the equity justifies (v28-style tiers).
+
+    A cap, not a target: the net keeps its size preference within the band. Weak
+    hands are held to <=0.5 pot (bluff sizing) rather than the net's overbets."""
+    if equity >= 0.85:
+        return 99.0      # nutted — any size, incl. all-in
+    if equity >= 0.72:
+        return 2.0
+    if equity >= 0.62:
+        return 1.0
+    if equity >= 0.52:
+        return 0.5
+    return 0.5           # marginal/air: small bets only
+
+
+def _equity_clamp(legal: list, arr: np.ndarray, gs: dict, equity: float | None,
+                  profile_counts: tuple,
+                  aggressor: tuple = ("unknown", 0.0)) -> np.ndarray:
+    """Apply the Module-D2 equity guardrails to a legal-indexed probability array.
+
+    Read-aware: the hard-fold edge and the size cap bend with the opponent
+    profile so the guards reinforce, rather than override, the Module D1 exploit
+    shift and Module B range-conditioned equity. `profile_counts` is the active
+    field's (maniac, station, nit); `aggressor` is the (tag, conf) of the player
+    whose bet we're facing. Operates on a copy and returns a renormalised
+    distribution over `legal`. No-op when VLAD_EQUITY_CLAMP is off or equity is
+    unavailable."""
+    if not _EQUITY_CLAMP or equity is None:
+        return arr
+
+    maniac, station, _nit = profile_counts
+    agg_tag, agg_conf = aggressor
+    confident_read = agg_conf >= _EXPLOIT_CONF
+    owed = gs["amount_owed"]
+    pot  = max(1, gs["pot"])
+    arr  = arr.copy()
+    pos  = {a: i for i, a in enumerate(legal)}
+    bet_actions = [a for a in _BET_ORDER if a in pos]   # legal, ascending size
+
+    # (3) Hard fold when equity is far below the price — but the threshold is
+    #     read-aware: don't fold to a maniac's bet (they bluff; D1 already leans
+    #     us toward calling), fold more readily to a value-only nit/station.
+    if owed > 0 and _FOLD in pos:
+        edge_thr = _CLAMP_FOLD_EDGE
+        if confident_read:
+            if agg_tag == "maniac":
+                edge_thr = _CLAMP_FOLD_EDGE_MANIAC
+            elif agg_tag in ("nit", "station"):
+                edge_thr = _CLAMP_FOLD_EDGE_NIT
+        pot_odds = owed / (pot + owed)
+        if equity - pot_odds < edge_thr:
+            out = np.zeros_like(arr)
+            out[pos[_FOLD]] = 1.0
+            return out
+
+    # (1) Cap bet/raise size by equity; move over-cap mass to the largest allowed.
+    #     Relax the cap for VALUE bets into a calling station (they pay off
+    #     oversized value), but keep low-equity bluff sizing capped — stations
+    #     don't fold, so a big bluff into one is pure loss.
+    if bet_actions:
+        cap = _max_size_frac(equity)
+        if station > 0 and maniac == 0 and equity >= _CLAMP_STATION_EQ:
+            cap = max(cap, 2.0)
+        allowed = [a for a in bet_actions if _ACTION_POT_FRAC[a] <= cap] or [bet_actions[0]]
+        target  = allowed[-1]
+        moved = 0.0
+        for a in bet_actions:
+            if _ACTION_POT_FRAC[a] > cap and a != target:
+                moved += arr[pos[a]]
+                arr[pos[a]] = 0.0
+        arr[pos[target]] += moved
+
+    # (1b) Floor aggression with the nuts: don't check/min-bet a monster — unless
+    #      a maniac is live, where checking to induce their bluffs is higher EV.
+    if (owed == 0 and equity >= _CLAMP_VALUE_EQ and _CHECK_CALL in pos
+            and bet_actions and maniac == 0):
+        ci   = pos[_CHECK_CALL]
+        move = arr[ci] * 0.5
+        arr[ci] -= move
+        bw = sum(arr[pos[a]] for a in bet_actions)
+        if bw > 1e-9:
+            for a in bet_actions:
+                arr[pos[a]] += move * arr[pos[a]] / bw
+        else:
+            arr[pos[bet_actions[-1]]] += move
+
+    # (2) Inelastic value sizing: up-size one tier vs a calling station.
+    if station > 0 and maniac == 0 and equity >= _CLAMP_STATION_EQ and len(bet_actions) >= 2:
+        ladder = bet_actions if equity >= 0.85 else [a for a in bet_actions if a != _ALL_IN]
+        for i in range(len(ladder) - 1):
+            shift = arr[pos[ladder[i]]] * _CLAMP_STATION_UPSHIFT
+            arr[pos[ladder[i]]]     -= shift
+            arr[pos[ladder[i + 1]]] += shift
+
+    s = arr.sum()
+    if s < 1e-12:
+        arr[:] = 1.0 / len(arr)
+    else:
+        arr /= s
+    return arr
+
 
 def _hero_position(gs: dict) -> tuple[int, int]:
     """(hero_pos, n_in_game): hero's seat offset from the dealer and table size.
@@ -650,7 +782,9 @@ def _mask_probs(full_probs: np.ndarray, legal: list) -> np.ndarray:
 
 def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
                      equity: float | None = None,
-                     exploit: tuple = (0.0, 0.0)) -> int:
+                     exploit: tuple = (0.0, 0.0),
+                     profile_counts: tuple = (0, 0, 0),
+                     aggressor: tuple = ("unknown", 0.0)) -> int:
     """
     GTO network with a targeted MC equity correction plus a read-derived exploit
     bias (Module D1).
@@ -687,6 +821,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
                 half = next((i for i, a in enumerate(legal) if a == _HALF), bet_idxs[0])
                 blended[half] += move
             blended /= blended.sum()
+        blended = _equity_clamp(legal, blended, gs, equity, profile_counts, aggressor)
         return legal[int(np.random.choice(len(legal), p=blended))]
 
     pot = gs["pot"]
@@ -700,6 +835,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
     call_idx = _legal_index(legal, _CHECK_CALL)
 
     if fold_idx is None or call_idx is None:
+        gto_arr = _equity_clamp(legal, gto_arr, gs, equity, profile_counts, aggressor)
         return legal[int(np.random.choice(len(legal), p=gto_arr))]
 
     # Equity edge (±20 pp) + read-derived exploit, capped at ±35 pp total.
@@ -709,6 +845,7 @@ def _realtime_search(gs: dict, legal: list, gto_probs: np.ndarray,
     blended[fold_idx] = max(blended[fold_idx] - shift, 0.0)
     blended[call_idx] = max(blended[call_idx] + shift, 0.0)
     blended /= blended.sum()
+    blended = _equity_clamp(legal, blended, gs, equity, profile_counts, aggressor)
     return legal[int(np.random.choice(len(legal), p=blended))]
 
 
@@ -1097,9 +1234,11 @@ def _exploit_bias(gs: dict, profiles: dict) -> tuple:
     return 0.0, _EXPLOIT_BET_MAX * best
 
 
-def _net_postflop(gs: dict, equity: float | None, profiles: dict | None = None) -> dict:
+def _net_postflop(gs: dict, equity: float | None, profiles: dict | None = None,
+                  profile_counts: tuple = (0, 0, 0)) -> dict:
     """GTO strategy net with the precomputed-equity fold/call correction and the
-    read-derived exploit bias (Module D1)."""
+    read-derived exploit bias (Module D1). Optional equity clamp (Module D2)
+    tames net sizing/over-call/over-bluff mistakes when VLAD_EQUITY_CLAMP is on."""
     vec   = _build_feature_vector(gs)
     probs = _numpy_forward(_GTO_LAYERS, vec)  # type: ignore[arg-type]
 
@@ -1120,7 +1259,12 @@ def _net_postflop(gs: dict, equity: float | None, profiles: dict | None = None) 
                 probs[_a] = probs[_a] * dampen
 
     exploit = _exploit_bias(gs, profiles) if profiles else (0.0, 0.0)
-    action_idx = _realtime_search(gs, legal, probs, equity=equity, exploit=exploit)
+    # Read on the player we're facing a bet from — feeds the read-aware clamp so
+    # the hard fold defers to the same archetype the exploit shift already used.
+    aggressor = _last_aggressor_read(gs, profiles) if (profiles and gs["amount_owed"] > 0) \
+        else ("unknown", 0.0)
+    action_idx = _realtime_search(gs, legal, probs, equity=equity, exploit=exploit,
+                                  profile_counts=profile_counts, aggressor=aggressor)
     return _abstract_to_raw(action_idx, gs)
 
 
@@ -1492,7 +1636,7 @@ def _postflop_decide(gs: dict, profile_counts: tuple = (0, 0, 0),
     if _POSTFLOP_ENGINE == "mc" or _GTO_LAYERS is None:
         action = _mc_postflop(gs, equity, profile_counts)
     else:
-        action = _net_postflop(gs, equity, profiles)
+        action = _net_postflop(gs, equity, profiles, profile_counts)
 
     action = _risk_gate(action, gs, equity)
     return _anti_punt(action, gs, equity, profiles)

@@ -68,15 +68,25 @@ def _merge_scalar(target: dict[int, float], source: dict[int, float]):
         target[k] = target.get(k, 0.0) + v
 
 
-def _floor_regrets(regret_sum: dict[int, np.ndarray]):
+def _floor_regrets(regret_sum: dict[int, np.ndarray],
+                   keys: set[int] | None = None):
     """Re-apply the RM+ non-negativity floor to the merged regret table.
 
     Single-process CFR+ keeps regrets ≥0 inline (see cfr._traverse), but the
     parallel delta-merge sums per-worker deltas of independently-floored regrets,
     which can dip a cell below 0.  Clamp here so the shared table preserves the
     RM+ invariant before the next round warm-starts from it.
+
+    `keys` (parallel mode): only rows a delta touched this round can have been
+    driven negative — untouched rows kept their already-floored value — so
+    flooring just those is equivalent and turns this from an O(table) pass into
+    an O(rows-touched-this-round) one.  That matters: at multi-million-row tables
+    the full pass was a dominant share of the single-threaded merge cost.  None =
+    floor the whole table (caller didn't track touched keys).
     """
-    for v in regret_sum.values():
+    rows = (regret_sum[k] for k in keys if k in regret_sum) \
+        if keys is not None else regret_sum.values()
+    for v in rows:
         np.maximum(v, 0.0, out=v)
 
 
@@ -257,13 +267,17 @@ def train(
                 # iter_done so weights stay monotonic across the whole run.
                 tasks  = [(c, random.randrange(2**31), regret_sum, iter_done)
                           for c in counts]
+                touched: set[int] = set()
                 for dr, ds, dv in pool.map(_worker_delta, tasks):
                     _merge(regret_sum,   dr)
                     _merge(strategy_sum, ds)
                     _merge_scalar(visit_sum, dv)
+                    touched.update(dr.keys())
                 # Restore the RM+ floor after summing independently-floored
-                # per-worker regret deltas (see _floor_regrets).
-                _floor_regrets(regret_sum)
+                # per-worker regret deltas (see _floor_regrets).  Only rows a
+                # delta touched this round can have gone negative, so floor just
+                # those — O(touched) instead of O(table).
+                _floor_regrets(regret_sum, touched)
                 del tasks
 
             iter_done += n
@@ -283,6 +297,17 @@ def train(
                 cur_premium = _premium_snapshot(strategy_sum)
                 drift = _max_premium_drift(prev_premium, cur_premium)
 
+                # Broad-coverage guard: the premium-drift gate alone shipped a
+                # diffuse table last time (premiums settle long before the rest
+                # of the tree is visited).  Only let the gate fire once most kept
+                # info sets have cleared the visit target too.
+                if visit_sum:
+                    _vc = np.fromiter(visit_sum.values(), dtype=np.float64,
+                                      count=len(visit_sum))
+                    met_frac = float((_vc >= config.TARGET_VISITS_PER_SET).mean())
+                else:
+                    met_frac = 0.0
+
                 if verbose:
                     print(f"[preflop_cfr] Checkpoint saved at iter {iter_done}.",
                           flush=True)
@@ -291,7 +316,8 @@ def train(
 
                 prev_premium = cur_premium
 
-                if drift is not None and drift < config.CONVERGENCE_DRIFT_EPS:
+                if (drift is not None and drift < config.CONVERGENCE_DRIFT_EPS
+                        and met_frac >= config.CONVERGENCE_MIN_MET_FRAC):
                     stable_ckpts += 1
                     if verbose:
                         print(f"[preflop_cfr] premium drift {drift:.4f} < eps "
@@ -306,9 +332,13 @@ def train(
                         break
                 else:
                     if drift is not None and verbose:
-                        print(f"[preflop_cfr] premium drift {drift:.4f} "
-                              f"(>= eps {config.CONVERGENCE_DRIFT_EPS}); "
-                              f"streak reset", flush=True)
+                        why = ("met_frac %.2f < %.2f" %
+                               (met_frac, config.CONVERGENCE_MIN_MET_FRAC)
+                               if drift < config.CONVERGENCE_DRIFT_EPS
+                               else "drift >= eps %.3f" % config.CONVERGENCE_DRIFT_EPS)
+                        print(f"[preflop_cfr] no early-stop ({why}); "
+                              f"streak reset  [drift={drift:.4f} "
+                              f"met_frac={met_frac:.2f}]", flush=True)
                     stable_ckpts = 0
     finally:
         if pool is not None:
@@ -333,9 +363,12 @@ def train(
 # double as the visit proxy.)
 _VISIT_BINS = [0, 1, 10, 100, 1_000, 10_000]
 
-# Premium UTG-open hands to watch for strategy drift (the ones the old
-# unconverged table mangled — see preflop-table-disabled memory).
-_PREMIUM_HANDS = ("AA", "KK", "QQ", "JJ", "AKs", "AKo")
+# UTG-open hands to watch for strategy drift.  Mixes premiums (settle fastest)
+# with marginal/threshold hands (ATs, KJo, 99, 77, A5s, KQs) whose open vs fold
+# vs raise mix keeps moving until the tree is genuinely converged — so the drift
+# gate tracks the slow part of the tree, not just the 6 hands that lock in early.
+_PREMIUM_HANDS = ("AA", "KK", "QQ", "JJ", "AKs", "AKo",
+                  "ATs", "KQs", "KJo", "99", "77", "A5s")
 
 
 def _visit_histogram(visit_sum: dict[int, float]) -> None:

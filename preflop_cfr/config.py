@@ -24,21 +24,23 @@ N_ACTIONS     = 9
 # Raise sizes that make sense preflop. Pot-relative formulas match _abstract_to_raw
 # in bot.py so chip amounts are identical at solve-time and inference-time.
 #
-# Deliberately coarse: FOLD / CHECK_CALL / one pot-sized raise / ALL_IN.  A
-# full-pot preflop raise lands at a natural ~3.5bb open (pot 150 + owed 100 →
-# raise-by 250 → to 350), so two sizes (pot, jam) cover open/3-bet/jam lines well.
-# The point is to keep the game tree small enough that every reachable info set
-# gets enough visits to converge — the previous 6-action × 4-raise tree had
-# ~4.9M info sets (≈0.08 visits/set after 400k traversals) and never converged.
-PREFLOP_ACTIONS = [FOLD, CHECK_CALL, BET_FULL_POT, ALL_IN]
+# Two sized raises + jam.  The single-pot-raise tree ([F,C,POT,JAM]) converged
+# but played jam-happy poker: with only one non-jam size the solver expresses all
+# aggression as ALL_IN (open-shoves AKs, jams QQ for 100bb), which bleeds chips vs
+# disciplined fields.  Adding a smaller raise gives a genuine non-jam open/3-bet
+# ladder:  ⅓-pot ≈ a ~2.3bb open, full-pot scales up for 3-bets, ALL_IN for
+# 4-bet/jam.  This grows the reachable tree to ~2-4M info sets (vs ~430k), so it
+# needs the bigger visit budget below + the parallel throughput fixes in train.py.
+# Do NOT expand to the full 6-raise set — that was the ~4.9M tree that never
+# converged (≈0.08 visits/set after 400k traversals).
+PREFLOP_ACTIONS = [FOLD, CHECK_CALL, BET_THIRD_POT, BET_FULL_POT, ALL_IN]
 
-# Cap on non-jam raises in the preflop tree.  2 = open + 3-bet with a sized raise;
-# 4-bets and beyond are still reachable via ALL_IN (always legal), so 4-bet-jam
-# lines survive.  Dropping from 3→2 prunes the deepest, rarest re-raise subtrees,
-# which (a) shrinks the reachable info-set count so the visit budget converges
-# faster and (b) removes the most expensive multiway all-in equity leaves.  This
-# is the one knob here that trades strategy resolution (non-jam 4-bet sizing) for
-# convergence speed — raise back to 3 if the wall-clock budget allows.
+# Cap on non-jam raises in the preflop tree.  2 = open + 3-bet with sized raises;
+# 4-bets and beyond are reachable via ALL_IN (always legal), so 4-bet-jam lines
+# survive.  With two sized raises active this already fixes the jam-happy
+# pathology (the solver can 3-bet to a real size instead of shoving) WITHOUT the
+# tree blow-up of MAX=3: calibration showed [⅓,POT]+MAX=3 reaches ~5M info sets
+# (won't converge in 16h on the current solver), so 2 is the tractable sweet spot.
 MAX_RAISES_PREFLOP = 2
 
 # ── Training ───────────────────────────────────────────────────────────────────
@@ -56,11 +58,11 @@ MAX_RAISES_PREFLOP = 2
 ITERATIONS         = 20_000_000  # ES-MCCFR traversal ceiling
 QUICK_ITERATIONS   = 5_000       # smoke-test run (--quick flag)
 CHECKPOINT_EVERY   = 1_000_000
-PRUNE_MIN_VISITS   = 10        # drop info sets visited < N times at export
+PRUNE_MIN_VISITS   = 40        # drop info sets visited < N times at export
 # Convergence gate (diagnostic only): target average visits per kept info set.
 # Once most info sets clear this and the premium-hand drift has flattened across
 # consecutive checkpoints, the table is effectively converged.
-TARGET_VISITS_PER_SET = 1_000
+TARGET_VISITS_PER_SET = 400
 
 # ── Early-stop convergence gate ────────────────────────────────────────────────
 # Stop training once the premium UTG-open strategy mix (AA/KK/.../AKo) changes by
@@ -70,9 +72,17 @@ TARGET_VISITS_PER_SET = 1_000
 # chasing rare info sets long after the strategy has settled.
 CONVERGENCE_DRIFT_EPS = 0.01
 CONVERGENCE_PATIENCE  = 3
-# Parallel mode: iterations between cross-worker merges. Smaller = closer to
-# true sequential CFR (less worker divergence) but more broadcast overhead.
-SYNC_EVERY         = 100_000
+# Guard against the failure that shipped the last table: the premium-hand drift
+# gate tripped while >50% of the tree was still diffuse (premiums settle early).
+# Don't allow early-stop until this fraction of kept info sets has also cleared
+# TARGET_VISITS_PER_SET — i.e. the *whole* tree, not just 6 hands, is well-visited.
+CONVERGENCE_MIN_MET_FRAC = 0.80
+# Parallel mode: iterations between cross-worker merges. The parent merge is the
+# scaling bottleneck (single-threaded delta-sum over the touched rows), so on a
+# many-core box raise this to amortize the merge over more per-worker work: at 96
+# workers, 1M iters/round ≈ 10k iters/worker before a merge. Smaller = closer to
+# true sequential CFR (less worker divergence) but a merge-bound throughput floor.
+SYNC_EVERY         = 1_000_000
 # Parallel mode RAM budget (GB) for the live regret/strategy tables and their
 # per-worker copies.  Each round the trainer caps the number of concurrent
 # workers so that  workers × (~3 × table_size)  stays under this budget.  As the
