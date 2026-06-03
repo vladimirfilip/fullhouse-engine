@@ -93,7 +93,7 @@ LEARNING_RATE     = 2e-3
 # across-iteration time-average, not per-iter fit depth, so fewer steps/iter +
 # more iterations is the right trade under a fixed wall-clock budget. ~6 passes
 # over the 8M buffer at batch 65 536: REGRET_BUF_CAP / BATCH_SIZE * 6 ≈ 732.
-REGRET_TRAIN_STEPS    = 750
+REGRET_TRAIN_STEPS    = 400
 
 # Strategy net: trained once at the end and ships in production. Needs more passes
 # than the regret net but at batch 65 536 far fewer steps reach them: ~33 passes =

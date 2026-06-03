@@ -38,13 +38,6 @@ from .config import (
     INPUT_DIM, N_ACTIONS,
 )
 
-# Mid-run strategy snapshots exist only so an interrupted run still leaves a
-# usable model; they don't feed back into training. At 300 iters the old
-# every-5-iters × 2 000-step cadence spent a large slice of wall-clock retraining
-# a throwaway net. Snapshot less often and for fewer steps (the bigger batch also
-# covers the buffer faster) — the budget goes to data-gen and the final net.
-STRATEGY_CKPT_EVERY  = 25    # train+export strategy snapshot every N iterations
-STRATEGY_CKPT_STEPS  = 500   # quick mid-run training steps (vs the final pass)
 from .networks import make_regret_net, make_strategy_net
 from .export import export_net, load_net
 
@@ -343,21 +336,6 @@ def train(
         old = os.path.join(ckpt_dir, f"regret_net_iter_{t - 3}.npz")
         if os.path.exists(old):
             os.remove(old)
-
-        # ── Periodic strategy net snapshot ────────────────────────────────────
-        # Train a fresh strategy net on the accumulated buffer and export it to
-        # gto_strategy.npz every STRATEGY_CKPT_EVERY iterations so the bot has
-        # a usable model even if the run is interrupted before completion.
-        if t % STRATEGY_CKPT_EVERY == 0 and cpp_buffers.strategy_ready(BATCH_SIZE):
-            print(f"  Strategy snapshot (iter {t}, {STRATEGY_CKPT_STEPS} steps)…")
-            snap_net = make_strategy_net().to(device)
-            _train_strategy(snap_net, cpp_buffers, STRATEGY_CKPT_STEPS, device)
-            out_dir = os.path.join(os.path.dirname(__file__), "..", "bots", "vlad", "data")
-            os.makedirs(out_dir, exist_ok=True)
-            snap_path = os.path.join(out_dir, MODEL_FILENAME + ".npz")
-            export_net(snap_net, snap_path)
-            print(f"  Strategy snapshot -> {os.path.abspath(snap_path)}")
-            del snap_net
 
     # ── Final strategy net training ────────────────────────────────────────
     print(f"\n[stop] {stop_reason}")
