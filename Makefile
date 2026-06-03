@@ -149,8 +149,10 @@ clean:
 	find . -type f -name "*.pyc" -delete
 
 # ── Release: package bot.py + data/ into a timestamped snapshot ─────────────
+# Pick which bot under bots/ to package, e.g. `make release-zip NAME=the_house`.
+NAME ?= vlad
 release:
-	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; shutil.copytree('bots/vlad/data',d+'/data'); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); print('Release ready: '+d)"
+	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); src='bots/$(NAME)'; d='bots/$(NAME)_'+ts; shutil.copytree(src+'/data',d+'/data'); shutil.copy(src+'/bot.py',d+'/bot.py'); print('Release ready: '+d)"
 
 release-zip:
-	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); d='bots/vlad_'+ts; shutil.copytree('bots/vlad/data',d+'/data'); shutil.copy('bots/vlad/bot.py',d+'/bot.py'); shutil.make_archive(d,'zip',root_dir=d); shutil.rmtree(d); print('Release ready: '+d+'.zip')"
+	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); src='bots/$(NAME)'; d='bots/$(NAME)_'+ts; shutil.copytree(src+'/data',d+'/data'); shutil.copy(src+'/bot.py',d+'/bot.py'); shutil.make_archive(d,'zip',root_dir=d); shutil.rmtree(d); print('Release ready: '+d+'.zip')"
