@@ -246,6 +246,12 @@ def train(
     # DirectML is opt-in via `pip install torch-directml`; absence is silent.
     if torch.cuda.is_available():
         device = torch.device("cuda")
+        # TF32 matmuls: ~2-3x faster than full fp32 on Ampere+/Blackwell at
+        # negligible accuracy cost for this regression MLP. Free speedup on the
+        # 16ms/step compute once the data feed is no longer the bottleneck.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
     else:
         try:
             import torch_directml  # type: ignore
