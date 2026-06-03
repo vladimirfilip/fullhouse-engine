@@ -3,6 +3,9 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 #include <cstring>
+#include <thread>
+#include <vector>
+#include <algorithm>
 #include "train.hpp"
 #include "network.hpp"
 #include "config.hpp"
@@ -12,6 +15,25 @@
 
 namespace py = pybind11;
 using farray = py::array_t<float, py::array::c_style | py::array::forcecast>;
+
+// Run fn(i) for i in [0,k) across a few threads. Used to parallelise the reservoir
+// row gather (a ~68 MB random copy) over the cores left idle during training —
+// the single biggest training-loop speedup on a many-core box feeding one GPU.
+template <class F>
+static void gather_parallel(int k, F fn) {
+    unsigned hw = std::thread::hardware_concurrency();
+    int nthreads = (int)std::min<unsigned>(hw ? hw : 1u, 16u);
+    nthreads = std::max(1, std::min(nthreads, k / 8192));  // >=8k rows/thread
+    if (nthreads <= 1) { for (int i = 0; i < k; i++) fn(i); return; }
+    std::vector<std::thread> ts;
+    int chunk = (k + nthreads - 1) / nthreads;
+    for (int tix = 0; tix < nthreads; tix++) {
+        int lo = tix * chunk, hi = std::min(k, lo + chunk);
+        if (lo >= hi) break;
+        ts.emplace_back([lo, hi, &fn] { for (int i = lo; i < hi; i++) fn(i); });
+    }
+    for (auto& th : ts) th.join();
+}
 
 // ── Feature-parity helper ───────────────────────────────────────────────────
 // Build the INPUT_DIM feature vector from a Python game-state dict in the SAME
@@ -183,15 +205,18 @@ public:
         int batch_size = (int)s_info.shape[0];
         {
             py::gil_scoped_release release;
-            auto batch = regret_buf_.sample(batch_size);
-            int k = (int)batch.size();
-            for (int i = 0; i < k; i++) {
+            std::vector<int> idx;
+            regret_buf_.sample_indices(batch_size, idx);   // single-threaded index gen
+            int k = (int)idx.size();
+            const auto& D = regret_buf_.data();
+            gather_parallel(k, [&](int i) {                // parallel single-copy gather
+                const RegretSample& smp = D[idx[i]];
                 std::memcpy(s + (size_t)i * INPUT_DIM,
-                            batch[i].state.data(), INPUT_DIM * sizeof(float));
+                            smp.state.data(), INPUT_DIM * sizeof(float));
                 std::memcpy(t + (size_t)i * N_ACTIONS,
-                            batch[i].regrets,     N_ACTIONS * sizeof(float));
-                w[i] = batch[i].weight;
-            }
+                            smp.regrets, N_ACTIONS * sizeof(float));
+                w[i] = smp.weight;
+            });
             return k;
         }
     }
@@ -206,15 +231,18 @@ public:
         int batch_size = (int)s_info.shape[0];
         {
             py::gil_scoped_release release;
-            auto batch = strategy_buf_.sample(batch_size);
-            int k = (int)batch.size();
-            for (int i = 0; i < k; i++) {
+            std::vector<int> idx;
+            strategy_buf_.sample_indices(batch_size, idx);
+            int k = (int)idx.size();
+            const auto& D = strategy_buf_.data();
+            gather_parallel(k, [&](int i) {
+                const StrategySample& smp = D[idx[i]];
                 std::memcpy(s + (size_t)i * INPUT_DIM,
-                            batch[i].state.data(), INPUT_DIM * sizeof(float));
+                            smp.state.data(), INPUT_DIM * sizeof(float));
                 std::memcpy(t + (size_t)i * N_ACTIONS,
-                            batch[i].strategy,    N_ACTIONS * sizeof(float));
-                w[i] = batch[i].weight;
-            }
+                            smp.strategy, N_ACTIONS * sizeof(float));
+                w[i] = smp.weight;
+            });
             return k;
         }
     }

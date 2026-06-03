@@ -68,6 +68,43 @@ public:
         return result;
     }
 
+    // Generate up to n unique random indices into the buffer (single-threaded;
+    // uses rng_). Cheap vs. the row gather, which the caller does in parallel
+    // (it knows the concrete sample layout) — see binding.cpp. This avoids the
+    // old two-copy path (data_ -> std::vector<T> -> numpy); the caller now
+    // copies once, data_ -> numpy, across many threads.
+    void sample_indices(int n, std::vector<int>& out) {
+        int sz = (int)data_.size();
+        int k  = std::min(n, sz);
+        out.clear();
+        out.reserve(k);
+        if (k >= sz) {
+            for (int i = 0; i < sz; i++) out.push_back(i);
+            return;
+        }
+        if (k * 4 <= sz) {
+            std::unordered_set<int> chosen;
+            chosen.reserve(k * 2);
+            std::uniform_int_distribution<int> dist(0, sz - 1);
+            while ((int)out.size() < k) {
+                int r = dist(rng_);
+                if (chosen.insert(r).second) out.push_back(r);
+            }
+        } else {
+            std::vector<int> idx(sz);
+            std::iota(idx.begin(), idx.end(), 0);
+            for (int i = 0; i < k; i++) {
+                int j = std::uniform_int_distribution<int>(i, sz - 1)(rng_);
+                std::swap(idx[i], idx[j]);
+                out.push_back(idx[i]);
+            }
+        }
+    }
+
+    // Read-only view for the parallel gather. Valid only while no add()/clear()
+    // runs concurrently — true during the training phase (data-gen is paused).
+    const std::vector<T>& data() const { return data_; }
+
     bool is_ready(int min_size) const { return (int)data_.size() >= min_size; }
     int  size() const { return (int)data_.size(); }
     void clear() { data_.clear(); n_seen_ = 0; }
