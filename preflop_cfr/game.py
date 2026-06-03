@@ -33,6 +33,16 @@ from preflop_cfr.equity import multiway_equity
 REAL_OOP_FACTOR  = 0.85   # most out-of-position live seat
 REAL_IP_FACTOR   = 1.05   # most in-position live seat
 REAL_INIT_BONUS  = 0.07   # ×(1+β) for the preflop aggressor, ×(1-β) for callers
+# Hand-strength (implied-odds) realization: at a non-all-in leaf the flat model
+# can't see postflop streets, so it pays every hand its raw equity.  Real poker
+# lets STRONGER made hands realise MORE than raw equity (they get paid off / play
+# the easier postflop game) and weaker hands LESS.  We model this by sharpening
+# the pot split toward higher-equity hands: weight ∝ equity**(γ−1), so the final
+# share ∝ equity**γ (renormalised, still zero-sum).  γ>1 makes the value line
+# attractive enough that premiums RAISE for value instead of shoving to realise
+# full equity — the second half (with the ALL_IN gate) of the open-shove fix.
+# Calibration knob: 1.0 = no sharpening (old behaviour); 1.25 = moderate.
+REAL_EQUITY_GAMMA = 1.25
 
 
 # ── Abstract-to-chips sizing (mirrors bot.py _abstract_to_raw, no jitter) ─────
@@ -138,13 +148,16 @@ def _last_aggressor_seat(state: PreflopState) -> int:
     return -1
 
 
-def _realization_weights(state: PreflopState, live: list[int]) -> list[float]:
+def _realization_weights(state: PreflopState, live: list[int],
+                         equities: list[float]) -> list[float]:
     """
     Per-live-seat equity-realization weight for a checked-to-flop leaf.
 
-    Combines postflop position (most-IP seat realises most) with initiative
-    (the preflop aggressor realises more, pure callers less).  Returned in the
-    same order as `live`; the caller renormalises so the pot split is zero-sum.
+    Combines postflop position (most-IP seat realises most), initiative (the
+    preflop aggressor realises more, pure callers less), and hand strength
+    (implied odds: stronger hands realise above their raw equity, weaker ones
+    below — see REAL_EQUITY_GAMMA).  `equities` is aligned to `live`.  Returned in
+    the same order as `live`; the caller renormalises so the pot split is zero-sum.
     """
     n = state.n_players
     # Postflop action order: SB acts first … BTN last.  rank = later = more IP.
@@ -155,12 +168,16 @@ def _realization_weights(state: PreflopState, live: list[int]) -> list[float]:
     aggressor = _last_aggressor_seat(state)
 
     weights = []
-    for seat in live:
+    for idx, seat in enumerate(live):
         frac = (post_rank[seat] - lo) / span        # 0 (most OOP) … 1 (most IP)
         w = REAL_OOP_FACTOR + frac * (REAL_IP_FACTOR - REAL_OOP_FACTOR)
         if aggressor != -1:
             w *= (1.0 + REAL_INIT_BONUS) if seat == aggressor \
                 else (1.0 - REAL_INIT_BONUS)
+        # Hand-strength (implied-odds) term: weight ∝ equity**(γ−1) so the final
+        # pot share (weight×equity below) ∝ equity**γ.  Sharpens toward made hands.
+        if REAL_EQUITY_GAMMA != 1.0:
+            w *= equities[idx] ** (REAL_EQUITY_GAMMA - 1.0)
         weights.append(w)
     return weights
 
@@ -187,7 +204,7 @@ def terminal_utilities(state: PreflopState) -> list[float]:
     # the pot split zero-sum.
     all_in_showdown = all(state.all_in[i] or state.stacks[i] == 0 for i in live)
     if not all_in_showdown:
-        w = _realization_weights(state, live)
+        w = _realization_weights(state, live, equities)
         weighted = [equities[j] * w[j] for j in range(len(live))]
         tot = sum(weighted)
         if tot > 0:
@@ -220,6 +237,7 @@ def legal_actions(state: PreflopState) -> list[int]:
         cur     = state.current_bet
         eff_pot = state.pot + owed
 
+        sized_added = False
         if state.n_raises < config.MAX_RAISES_PREFLOP:
             last_tgt = -1
             for a_idx, frac in (
@@ -237,8 +255,19 @@ def legal_actions(state: PreflopState) -> list[int]:
                 if tgt < all_tot and tgt != last_tgt:
                     last_tgt = tgt
                     legal.append(a_idx)
+                    sized_added = True
 
-        legal.append(config.ALL_IN)
+        # ALL_IN gate — the structural half of the open-shove fix.  At 100bb a
+        # first-in or 3-bet shove is never GTO (it's the open-shove pathology), so
+        # offer ALL_IN only when it's genuinely correct: as a 4-bet+ (past the
+        # sized-raise ladder, n_raises >= MAX_RAISES_PREFLOP), or when no sized
+        # raise fits because every one is >= the seat's stack (a real short-stack
+        # commit).  This makes open/3-bet shoves UNREACHABLE in the tree rather
+        # than relying on the solver to learn not to take them.
+        if config.ALL_IN in config.PREFLOP_ACTIONS and (
+            state.n_raises >= config.MAX_RAISES_PREFLOP or not sized_added
+        ):
+            legal.append(config.ALL_IN)
 
     return legal
 
