@@ -105,31 +105,49 @@ def _parallel_generate(
 
 # ── Training helpers ───────────────────────────────────────────────────────
 
+def _make_io_buffers(device: torch.device):
+    """Two reusable (state, target, weight) tensor triples for double-buffered
+    prefetch, plus their numpy views the C++ sampler fills in place.
+
+    Pinned host memory on CUDA so `.to(device, non_blocking=True)` is a genuinely
+    async H2D copy (non_blocking is a no-op from pageable memory). Plain tensors
+    on CPU, where pin_memory requires CUDA and isn't needed.
+    """
+    pin = device.type == "cuda"
+    s = [torch.empty((BATCH_SIZE, INPUT_DIM), dtype=torch.float32, pin_memory=pin)
+         for _ in range(2)]
+    t = [torch.empty((BATCH_SIZE, N_ACTIONS), dtype=torch.float32, pin_memory=pin)
+         for _ in range(2)]
+    w = [torch.empty((BATCH_SIZE,), dtype=torch.float32, pin_memory=pin)
+         for _ in range(2)]
+    return (s, t, w,
+            [b.numpy() for b in s], [b.numpy() for b in t], [b.numpy() for b in w])
+
+
+def _make_adam(net: nn.Module, device: torch.device) -> optim.Adam:
+    # fused=True collapses the many tiny per-step optimizer kernel launches that
+    # dominate wall-time on this small MLP; only supported on CUDA.
+    return optim.Adam(net.parameters(), lr=LEARNING_RATE,
+                      fused=(device.type == "cuda"))
+
+
 def _train_regret(net: nn.Module, cpp_buffers, n_steps: int,
                   device: torch.device) -> float:
     """Iteration-weighted MSE on (state, regret_vector, weight) triples.
 
-    Uses double-buffered prefetch: a background thread fills numpy buffer B via
-    GIL-free sample_regret_into() while PyTorch trains on buffer A, then they
-    swap. This hides the ~10–20 ms C++ sampling cost behind forward/backward.
+    Double-buffered prefetch: a background thread fills buffer B via GIL-free
+    sample_regret_into() while PyTorch trains on buffer A, then they swap.
 
-    Linear-CFR weighting (weight = iteration_t) ensures later iterations
-    dominate: early regret estimates from the random-initialised network are
-    down-weighted relative to well-trained late iterations.
+    Perf: the loss is kept on-device and only synced to host at the print cadence
+    (a per-step loss.item() forces a CUDA sync every step, which serialises the
+    GPU and defeats the prefetch). Buffers are pinned (see _make_io_buffers) and
+    the optimizer is fused (see _make_adam).
     """
     net.train()
-    opt     = optim.Adam(net.parameters(), lr=LEARNING_RATE)
+    opt     = _make_adam(net, device)
     loss_fn = nn.MSELoss(reduction="none")
-    last_loss = 0.0
-
-    # Two buffer triples — training uses one while C++ fills the other.
-    s_bufs = [np.empty((BATCH_SIZE, INPUT_DIM), dtype=np.float32) for _ in range(2)]
-    t_bufs = [np.empty((BATCH_SIZE, N_ACTIONS), dtype=np.float32) for _ in range(2)]
-    w_bufs = [np.empty((BATCH_SIZE,),           dtype=np.float32) for _ in range(2)]
-    # torch.from_numpy shares memory (zero-copy); kept alive for the run.
-    s_tens = [torch.from_numpy(b) for b in s_bufs]
-    t_tens = [torch.from_numpy(b) for b in t_bufs]
-    w_tens = [torch.from_numpy(b) for b in w_bufs]
+    s_tens, t_tens, w_tens, s_bufs, t_bufs, w_bufs = _make_io_buffers(device)
+    last = None
 
     cur = 0
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -147,21 +165,20 @@ def _train_regret(net: nn.Module, cpp_buffers, n_steps: int,
             weights = w_tens[cur][:k].to(device, non_blocking=True)
 
             preds    = net(states)
-            per_elem = loss_fn(preds, targets)          # [B, N_ACTIONS]
-            per_samp = per_elem.mean(dim=1)             # [B]
-            # Linear CFR weighting: weight = iteration_t, applied as a true
-            # weighted mean. Same pattern as _train_strategy.
+            per_samp = loss_fn(preds, targets).mean(dim=1)   # [B]
+            # Linear CFR weighting (true weighted mean); do NOT normalise to
+            # mean=1 within the batch (that undoes the time-averaging).
             loss     = (per_samp * weights).sum() / (weights.sum() + 1e-8)
 
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            last_loss = loss.item()
+            last = loss.detach()        # keep on-device; no host sync here
             if step % 200 == 0:
-                print(f"    regret step {step:4d}  loss={loss.item():.4f}")
+                print(f"    regret step {step:4d}  loss={last.item():.4f}")
             cur = nxt
 
-    return last_loss
+    return last.item() if last is not None else 0.0
 
 
 def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
@@ -174,19 +191,13 @@ def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
     constant LR would oscillate through.
     """
     net.train()
-    opt      = optim.Adam(net.parameters(), lr=LEARNING_RATE)
+    opt      = _make_adam(net, device)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=n_steps, eta_min=1e-5
     )
     loss_fn = nn.MSELoss(reduction="none")
-    last_loss = 0.0
-
-    s_bufs = [np.empty((BATCH_SIZE, INPUT_DIM), dtype=np.float32) for _ in range(2)]
-    t_bufs = [np.empty((BATCH_SIZE, N_ACTIONS), dtype=np.float32) for _ in range(2)]
-    w_bufs = [np.empty((BATCH_SIZE,),           dtype=np.float32) for _ in range(2)]
-    s_tens = [torch.from_numpy(b) for b in s_bufs]
-    t_tens = [torch.from_numpy(b) for b in t_bufs]
-    w_tens = [torch.from_numpy(b) for b in w_bufs]
+    s_tens, t_tens, w_tens, s_bufs, t_bufs, w_bufs = _make_io_buffers(device)
+    last = None
 
     cur = 0
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -204,25 +215,23 @@ def _train_strategy(net: nn.Module, cpp_buffers, n_steps: int,
             weights = w_tens[cur][:k].to(device, non_blocking=True)
 
             preds    = net(states)
-            per_elem = loss_fn(preds, targets)          # [B, N_ACTIONS]
-            per_samp = per_elem.mean(dim=1)             # [B]
-            # Linear CFR weighting: weight = iteration_t, applied as a true
-            # weighted mean. Do NOT normalise to mean=1 within the batch — that
-            # collapses late-iteration samples to the same effective influence
-            # as early ones and undoes the time-averaging Deep CFR depends on.
+            per_samp = loss_fn(preds, targets).mean(dim=1)   # [B]
+            # Linear CFR weighting (true weighted mean); do NOT normalise to
+            # mean=1 within the batch — that undoes the time-averaging Deep CFR
+            # depends on.
             loss     = (per_samp * weights).sum() / (weights.sum() + 1e-8)
 
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             scheduler.step()
-            last_loss = loss.item()
+            last = loss.detach()        # keep on-device; no host sync here
             if step % 200 == 0:
                 lr = scheduler.get_last_lr()[0]
-                print(f"    strategy step {step:4d}  loss={loss.item():.4f}  lr={lr:.2e}")
+                print(f"    strategy step {step:4d}  loss={last.item():.4f}  lr={lr:.2e}")
             cur = nxt
 
-    return last_loss
+    return last.item() if last is not None else 0.0
 
 
 # ── Convergence yardstick ──────────────────────────────────────────────────
@@ -253,6 +262,124 @@ def _mean_tv(p: np.ndarray, q: np.ndarray) -> float:
     return float(0.5 * np.abs(p - q).sum(axis=1).mean())
 
 
+# ── Value-error probe ───────────────────────────────────────────────────────
+# A converged postflop strategy must bet/jam the nuts, continue with the nuts vs
+# a bet, and fold air to a pot-sized bet. The shipped 256x3 net failed this (it
+# checked the nut flush ~43%). We build the probe states with the PRODUCTION
+# feature builder (bots/the_house/bot.py `_build_feature_vector`) so the probe
+# also double-checks feature parity across the train/inference boundary.
+
+_FOLD_I, _CALL_I, _ALLIN_I = 0, 1, 8
+_BET_IS = (2, 3, 4, 5, 6, 7)
+_FEATURE_BUILDER = None
+
+
+def _feature_builder():
+    """Lazily import the_house's _build_feature_vector (the production mirror)."""
+    global _FEATURE_BUILDER
+    if _FEATURE_BUILDER is None:
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "bots", "the_house", "bot.py")
+        spec = importlib.util.spec_from_file_location("_house_probe", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _FEATURE_BUILDER = mod._build_feature_vector
+    return _FEATURE_BUILDER
+
+
+def _probe_states():
+    """List of (name, feature_vec, checker, hard_gate). checker(policy)->(ok,msg)."""
+    build = _feature_builder()
+
+    def gs(cards, board, street, owed, cur, pot, seat=2):
+        folds = (0, 1, 4, 5)
+        players = [{"seat": i, "bot_id": f"b{i}", "stack": 9000,
+                    "state": "folded" if i in folds else "active",
+                    "is_folded": i in folds, "is_all_in": False,
+                    "bet_this_street": 0} for i in range(6)]
+        al = [{"seat": 0, "action": "small_blind", "amount": 50},
+              {"seat": 1, "action": "big_blind", "amount": 100},
+              {"seat": 3, "action": "raise", "amount": 300}]
+        if owed > 0:
+            al.append({"seat": 3, "action": "raise", "amount": cur})
+        return {"street": street, "seat_to_act": seat, "pot": pot,
+                "community_cards": board, "current_bet": cur,
+                "min_raise_to": cur + 100, "amount_owed": owed,
+                "can_check": owed == 0, "your_cards": cards, "your_stack": 9000,
+                "your_bet_this_street": 0, "players": players,
+                "hand_id": "probe_h1", "action_log": al, "match_action_log": []}
+
+    NUT = (["Ah", "Kh"], ["Qh", "7h", "2h", "9c", "3d"])      # nut flush
+    AIR = (["As", "Kd"], ["Qh", "7h", "2h", "9c", "3d"])      # ace-high, no flush
+    OVP = (["Ad", "Ac"], ["Kh", "7c", "2d"])                  # overpair on flop
+
+    def bet_mass(p):
+        return float(sum(p[i] for i in _BET_IS) + p[_ALLIN_I])
+
+    def entropy(p):
+        return float(-sum(x * np.log(x + 1e-12) for x in p))
+
+    spots = [
+        ("nut_river_checked",
+         gs(*NUT, "river", 0, 0, 1200),
+         # Concentrated betting, NOT just nonzero bet mass: a uniform/mushy net
+         # has bet_mass~0.78 (7 of 9 actions are bets) and would falsely pass a
+         # loose threshold. Require high bet mass AND low check prob — exactly the
+         # "checks the nut flush 43%" failure this catches.
+         lambda p: (bet_mass(p) >= 0.85 and p[_CALL_I] <= 0.15,
+                    f"bet/jam={bet_mass(p):.2f} (>=0.85), check={p[_CALL_I]:.2f} (<=0.15)"),
+         True),                                               # HARD gate
+        ("nut_river_facing_pot",
+         gs(*NUT, "river", 1200, 1200, 1200),
+         lambda p: (p[_FOLD_I] <= 0.12,
+                    f"fold={p[_FOLD_I]:.2f} (need<=0.12)"),
+         False),
+        ("air_river_facing_pot",
+         gs(*AIR, "river", 1200, 1200, 1200),
+         lambda p: (p[_FOLD_I] >= 0.50,
+                    f"fold={p[_FOLD_I]:.2f} (need>=0.50)"),
+         False),
+        ("overpair_flop_checked",
+         gs(*OVP, "flop", 0, 0, 600),
+         lambda p: (bet_mass(p) >= 0.50,
+                    f"bet mass={bet_mass(p):.2f} (need>=0.50)"),
+         False),
+        ("nut_river_low_entropy",
+         gs(*NUT, "river", 0, 0, 1200),
+         lambda p: (entropy(p) <= 1.7,
+                    f"entropy={entropy(p):.2f} (need<=1.7)"),
+         False),
+    ]
+    out = []
+    for name, g, chk, hard in spots:
+        out.append((name, build(g).astype(np.float32), chk, hard))
+    return out
+
+
+def _value_probe(net, device, label: str) -> bool:
+    """Run the canonical-spot probe on a softmax strategy net. Returns whether the
+    HARD-gate spots pass; prints per-spot pass/fail. Never raises (a probe build
+    failure is logged and treated as a soft pass so it can't abort a run)."""
+    try:
+        spots = _probe_states()
+    except Exception as e:                                    # pragma: no cover
+        print(f"  [probe:{label}] SKIPPED (build failed: {e})")
+        return True
+    net.eval()
+    hard_ok = True
+    with torch.no_grad():
+        for name, fv, chk, hard in spots:
+            x = torch.from_numpy(fv).unsqueeze(0).to(device)
+            p = net(x).squeeze(0).float().cpu().numpy()
+            ok, msg = chk(p)
+            tag = "ok " if ok else "FAIL"
+            print(f"  [probe:{label}] {tag} {name:24s} {msg}")
+            if hard and not ok:
+                hard_ok = False
+    return hard_ok
+
+
 # ── Main training loop ─────────────────────────────────────────────────────
 
 def train(
@@ -260,6 +387,10 @@ def train(
     games_per_iter: int = GAMES_PER_ITER,
     n_workers: int = N_WORKERS,
     resume_from: str | None = None,
+    max_hours: float = 6.5,
+    tv_eps: float = 0.01,
+    plateau_snaps: int = 3,
+    min_iter_frac: float = 0.33,
 ) -> None:
     # Device order: CUDA (NVIDIA) > DirectML (AMD/Intel on Windows) > CPU.
     # DirectML is opt-in via `pip install torch-directml`; absence is silent.
@@ -306,9 +437,28 @@ def train(
     val_states: np.ndarray | None = None
     prev_val_policy: np.ndarray | None = None
 
+    # ── Budget + early-stop state ──────────────────────────────────────────
+    run_start  = time.perf_counter()
+    budget_s   = max_hours * 3600.0
+    iter_ewma: float | None = None        # smoothed iteration wall-time
+    tv_history: list[float] = []          # recent snapshot TV drifts
+    stop_reason = f"reached target {k_iterations} iterations"
+
     for t in range(start_iter + 1, k_iterations + 1):
+        # ── Wall-clock cap: stop BEFORE an iteration that would overrun, so the
+        # final strategy fit always runs and we ship a converged-as-possible net
+        # (the prior run had no cap and a hard kill shipped an undertrained net).
+        elapsed_total = time.perf_counter() - run_start
+        if iter_ewma is not None and elapsed_total + iter_ewma > budget_s:
+            stop_reason = (f"wall-clock cap ({max_hours}h): "
+                           f"{elapsed_total / 3600:.2f}h elapsed, "
+                           f"next iter ~{iter_ewma:.0f}s would overrun")
+            print(f"\n[budget] {stop_reason} — stopping data-gen, going to final fit.")
+            break
+
         t0 = time.perf_counter()
-        print(f"\n=== Iteration {t}/{k_iterations} ===")
+        print(f"\n=== Iteration {t}/{k_iterations} "
+              f"({elapsed_total / 3600:.2f}h / {max_hours}h) ===")
 
         # ── Parallel data generation (uses net trained in previous iteration) ─
         print(f"  Generating {games_per_iter} games across {n_workers} workers…",
@@ -332,6 +482,7 @@ def train(
             print(f"  Regret buffer too small ({cpp_buffers.regret_size()}), skipping train.")
 
         elapsed = time.perf_counter() - t0
+        iter_ewma = elapsed if iter_ewma is None else 0.6 * iter_ewma + 0.4 * elapsed
         print(f"  Iteration done in {elapsed:.1f}s")
 
         # ── Checkpoint: save outside data/ (keep last 3 to cap disk use) ────────
@@ -369,24 +520,51 @@ def train(
                 kk = cpp_buffers.sample_strategy_into(vs, vt, vw)
                 val_states = vs[:kk].copy()
             cur_pol = _policy_on(snap_net, val_states, device)
+            probe_ok = _value_probe(snap_net, device, f"iter{t}")
+            converged = False
             if prev_val_policy is not None:
                 tv = _mean_tv(cur_pol, prev_val_policy)
                 print(f"  [yardstick] strategy drift since last snapshot: "
                       f"mean TV = {tv:.4f}")
+                tv_history.append(tv)
+                # ── TV-drift plateau early-stop ───────────────────────────────
+                # If the averaged strategy has stopped moving (last N snapshots
+                # all below tv_eps) AND the value probe passes, we're converged —
+                # break and spend the rest of the budget on the final fit.
+                recent = tv_history[-plateau_snaps:]
+                if (t >= min_iter_frac * k_iterations
+                        and len(recent) >= plateau_snaps
+                        and all(v < tv_eps for v in recent)
+                        and probe_ok):
+                    converged = True
             prev_val_policy = cur_pol
             del snap_net
+            if converged:
+                stop_reason = (f"converged: last {plateau_snaps} snapshot TVs "
+                               f"< {tv_eps} and value probe passed")
+                print(f"\n[converged] {stop_reason} — going to final fit.")
+                break
 
     # ── Final strategy net training ────────────────────────────────────────
+    print(f"\n[stop] {stop_reason}")
     if cpp_buffers.strategy_ready(BATCH_SIZE):
         print(f"\nTraining strategy net ({STRATEGY_TRAIN_STEPS} steps)…")
         _train_strategy(strategy_net, cpp_buffers, STRATEGY_TRAIN_STEPS, device)
-        # Final yardstick reading: drift of the production net vs the last
-        # snapshot. A small value is the confirmation that 30 h was enough.
+        # Final yardstick: drift of the production net vs the last snapshot.
         if val_states is not None and prev_val_policy is not None:
             tv = _mean_tv(_policy_on(strategy_net, val_states, device),
                           prev_val_policy)
             print(f"[yardstick] final strategy drift vs last snapshot: "
                   f"mean TV = {tv:.4f}")
+        # Hard convergence gate: the diagnosed failure was checking the nuts.
+        final_ok = _value_probe(strategy_net, device, "final")
+        if not final_ok:
+            print("\n" + "!" * 64)
+            print("[CONVERGENCE FAIL] final net does not value-bet the nuts — "
+                  "do NOT ship over a known-good net. Train longer / check setup.")
+            print("!" * 64)
+        else:
+            print("\n[convergence OK] final net passes the value-error probe.")
     else:
         print("Strategy buffer too small; saving untrained strategy net.")
 
@@ -415,6 +593,15 @@ if __name__ == "__main__":
                          "in ./checkpoints/")
     ap.add_argument("--resume-from", type=str, default=None,
                     help="Continue from a specific regret-net checkpoint .npz")
+    ap.add_argument("--max-hours", type=float, default=6.5,
+                    help="Wall-clock cap: stop data-gen before overrun and run the "
+                         "final strategy fit (reserve ~1h of the 7h for it)")
+    ap.add_argument("--tv-eps", type=float, default=0.01,
+                    help="TV-drift plateau threshold for convergence early-stop")
+    ap.add_argument("--plateau-snaps", type=int, default=3,
+                    help="Consecutive sub-eps snapshots required to early-stop")
+    ap.add_argument("--min-iter-frac", type=float, default=0.33,
+                    help="Min fraction of --iters before early-stop can trigger")
     args = ap.parse_args()
 
     resume_from = args.resume_from
@@ -425,9 +612,11 @@ if __name__ == "__main__":
         else:
             print(f"--resume: latest checkpoint is {resume_from} (iteration {it}).")
 
+    common = dict(n_workers=args.workers, resume_from=resume_from,
+                  max_hours=args.max_hours, tv_eps=args.tv_eps,
+                  plateau_snaps=args.plateau_snaps,
+                  min_iter_frac=args.min_iter_frac)
     if args.quick:
-        train(k_iterations=5, games_per_iter=200, n_workers=args.workers,
-              resume_from=resume_from)
+        train(k_iterations=5, games_per_iter=200, **common)
     else:
-        train(k_iterations=args.iters, games_per_iter=args.games,
-              n_workers=args.workers, resume_from=resume_from)
+        train(k_iterations=args.iters, games_per_iter=args.games, **common)

@@ -17,7 +17,7 @@ static int action_onehot_idx(ActionType a) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Feature vector layout (INPUT_DIM = 308):
+// Feature vector layout (INPUT_DIM = 252):
 //   [0:52]    hole cards one-hot
 //   [52:104]  board cards one-hot
 //   [104:110] hero position rel. dealer (one-hot, 6)
@@ -35,11 +35,13 @@ static int action_onehot_idx(ActionType a) {
 //   [144]     min effective stack vs opponents / INITIAL_STACK
 //   [145:151] last-aggressor seat one-hot (6)
 //   [151]     last-aggressor amount / INITIAL_STACK
-//   [152:158] last-aggressor position rel. hero one-hot (6)
-//   [158:163] board texture: flush-draw, monotone, paired, two-paired, connected (5)
-//   [163]     n_active (active+all_in) / N_PLAYERS
-//   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
-// Mirror exactly in bots/vlad/bot.py — any drift silently corrupts inference.
+//   [152:155] board texture: flush-draw, paired, connected (3)
+//   [155]     n_active (active+all_in) / N_PLAYERS
+//   [156:252] action history 16 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
+// Tier-2b tightening (was 308): dropped last-aggressor rel-pos one-hot (-6,
+// redundant with seat one-hot + hero pos), board monotone+two-paired bits (-2),
+// and action-history 24->16 slots (-48).
+// Mirror exactly in bots/the_house/bot.py — any drift silently corrupts inference.
 // ─────────────────────────────────────────────────────────────────────────────
 
 FeatureVec build_feature_vector(const StateDict& s) {
@@ -93,7 +95,7 @@ FeatureVec build_feature_vector(const StateDict& s) {
             max_opp_stack = std::max(max_opp_stack, p.stack);
     }
     vec[144] = (float)std::min(s.your_stack, max_opp_stack) / INITIAL_STACK;
-    vec[163] = (float)n_active / std::max(N_PLAYERS, 1);
+    vec[155] = (float)n_active / std::max(N_PLAYERS, 1);
 
     // ── 9. Last aggressor [145:158] ───────────────────────────────────────────
     // ── 10. Board texture [158:163] ───────────────────────────────────────────
@@ -112,23 +114,21 @@ FeatureVec build_feature_vector(const StateDict& s) {
             rank_counts[card_rank(s.community_cards[c])]++;
         }
         int max_suit = *std::max_element(suit_counts, suit_counts + 4);
-        vec[158] = (max_suit >= 2) ? 1.0f : 0.0f;
-        vec[159] = (max_suit >= 3) ? 1.0f : 0.0f;
+        vec[152] = (max_suit >= 2) ? 1.0f : 0.0f;   // flush-draw
         int pairs = 0;
         for (int r = 0; r < 13; r++) if (rank_counts[r] >= 2) pairs++;
-        vec[160] = (pairs >= 1) ? 1.0f : 0.0f;
-        vec[161] = (pairs >= 2) ? 1.0f : 0.0f;
+        vec[153] = (pairs >= 1) ? 1.0f : 0.0f;       // paired
         bool connected = false;
         for (int c1 = 0; c1 < s.n_community && !connected; c1++)
             for (int c2 = c1 + 1; c2 < s.n_community && !connected; c2++)
                 if (std::abs(card_rank(s.community_cards[c1]) -
                              card_rank(s.community_cards[c2])) == 1)
                     connected = true;
-        vec[162] = connected ? 1.0f : 0.0f;
+        vec[154] = connected ? 1.0f : 0.0f;          // connected
     }
 
-    // Single pass: find last aggressor + fill ring buffer of last 24 non-blind
-    const ActionEntry* ring[24];
+    // Single pass: find last aggressor + fill ring buffer of last 16 non-blind
+    const ActionEntry* ring[16];
     int ring_head = 0, n_seen = 0;
     int last_agg_seat = -1, last_agg_amount = 0;
     for (const auto& e : s.action_log) {
@@ -140,7 +140,7 @@ FeatureVec build_feature_vector(const StateDict& s) {
         }
         if (e.action != ActionType::SMALL_BLIND && e.action != ActionType::BIG_BLIND) {
             ring[ring_head] = &e;
-            ring_head = (ring_head == 23) ? 0 : ring_head + 1;
+            ring_head = (ring_head == 15) ? 0 : ring_head + 1;
             n_seen++;
         }
     }
@@ -150,15 +150,13 @@ FeatureVec build_feature_vector(const StateDict& s) {
         // Normalise by INITIAL_STACK (stable scale) rather than current pot,
         // which already includes this bet and would understate its size.
         vec[151] = (float)last_agg_amount / INITIAL_STACK;
-        int rel_pos = ((last_agg_seat - s.seat_to_act) % n_in_game + n_in_game) % n_in_game;
-        vec[152 + rel_pos] = 1.0f;
     }
 
-    int n_slots   = n_seen <= 24 ? n_seen : 24;
-    int start_pos = n_seen <= 24 ? 0 : ring_head;
+    int n_slots   = n_seen <= 16 ? n_seen : 16;
+    int start_pos = n_seen <= 16 ? 0 : ring_head;
     for (int slot = 0; slot < n_slots; slot++) {
-        const ActionEntry& e = *ring[(start_pos + slot) % 24];
-        int base  = 164 + slot * 6;
+        const ActionEntry& e = *ring[(start_pos + slot) % 16];
+        int base  = 156 + slot * 6;
         vec[base] = (float)e.seat / std::max(N_PLAYERS - 1, 1);
         int atype = action_onehot_idx(e.action);
         if (atype >= 0) vec[base + 1 + atype] = 1.0f;

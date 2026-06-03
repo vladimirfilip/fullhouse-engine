@@ -227,23 +227,48 @@ float mccfr(const GameState& state,
     }
 
     // ── Traverser node ────────────────────────────────────────────────────────
-    float action_evs[N_ACTIONS] = {};
+    // Regret-based pruning (see config.hpp): once the regret net is trained,
+    // skip recursion into regret-matching-zeroed actions deep in the regret
+    // range. They contribute 0 to node EV (strategy=0, EV stays exact) and keep
+    // their carried-forward negative regret target so they stay pruned.
+    float max_reg = raw_regrets[legal.acts[0]];
+    float min_reg = raw_regrets[legal.acts[0]];
     for (int a : legal) {
+        max_reg = std::max(max_reg, raw_regrets[a]);
+        min_reg = std::min(min_reg, raw_regrets[a]);
+    }
+    const bool  prune_on     = iteration_t >= PRUNE_START_ITER;
+    const float prune_thresh = max_reg - PRUNE_MARGIN_FRAC * (max_reg - min_reg);
+
+    float action_evs[N_ACTIONS] = {};
+    bool  pruned[N_ACTIONS]     = {};
+    int   n_kept = n_legal;
+    for (int a : legal) {
+        if (prune_on && strategy[a] == 0.0f && raw_regrets[a] < prune_thresh
+                && n_kept > MIN_TRAVERSE_ACTIONS) {
+            pruned[a] = true;
+            n_kept--;
+        }
+    }
+    for (int a : legal) {
+        if (pruned[a]) continue;
         action_evs[a] = mccfr(state.apply_action(a), traverser,
                                regret_net, regret_buf, strategy_buf,
                                iteration_t, depth + 1, rng);
     }
 
-    // Node EV = sum(strategy[a] * EV[a])
+    // Node EV = sum(strategy[a] * EV[a]) — pruned actions have strategy[a]=0.
     float node_ev = 0.0f;
     for (int a : legal) node_ev += strategy[a] * action_evs[a];
 
-    // Instantaneous regret
+    // Instantaneous regret. For pruned actions we carry forward the net's current
+    // (negative) regret estimate rather than a fabricated 0, so they stay pruned.
     RegretSample rs;
     rs.state  = fvec;
     rs.weight = std::pow((float)iteration_t, DCFR_ALPHA);  // DCFR discount
     std::fill(rs.regrets, rs.regrets + N_ACTIONS, 0.0f);
-    for (int a : legal) rs.regrets[a] = action_evs[a] - node_ev;
+    for (int a : legal)
+        rs.regrets[a] = pruned[a] ? raw_regrets[a] : (action_evs[a] - node_ev);
     regret_buf.push_back(rs);
 
     return node_ev;

@@ -29,8 +29,8 @@ BIG_BLIND     = 100
 
 # ── Feature vector ─────────────────────────────────────────────────────────
 # Layout (must match build_feature_vector in deep_cfr_cpp/src/features.cpp AND
-# _build_feature_vector in bots/vlad/bot.py byte-for-byte — any drift silently
-# corrupts inference).
+# _build_feature_vector in bots/the_house/bot.py byte-for-byte — any drift
+# silently corrupts inference).
 #   [0:52]    hole cards one-hot
 #   [52:104]  board cards one-hot
 #   [104:110] hero position rel. dealer (one-hot, 6)
@@ -48,21 +48,22 @@ BIG_BLIND     = 100
 #   [144]     min effective stack / INITIAL_STACK
 #   [145:151] last-aggressor seat one-hot (6)
 #   [151]     last-aggressor amount / INITIAL_STACK
-#   [152:158] last-aggressor pos rel. hero one-hot (6)
-#   [158:163] board texture (flush-draw, monotone, paired, two-paired, connected)
-#   [163]     n_active / N_PLAYERS
-#   [164:308] action history 24 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
-INPUT_DIM  = 308
+#   [152:155] board texture (flush-draw, paired, connected) (3)
+#   [155]     n_active / N_PLAYERS
+#   [156:252] action history 16 slots × 6 floats (seat, 4 action one-hot, amount/INITIAL_STACK)
+# Tier-2b tightening (was 308): dropped last-aggressor rel-pos one-hot (-6),
+# board monotone+two-paired bits (-2), action-history 24->16 slots (-48).
+INPUT_DIM  = 252
 # Training-tree raise cap AND the feature[142] normaliser. MUST match
 # MAX_RAISES_PER_STREET in deep_cfr_cpp/src/config.hpp and
-# _MAX_RAISES_PER_STREET in bots/vlad/bot.py (see config.hpp for the trade-off).
+# _MAX_RAISES_PER_STREET in bots/the_house/bot.py (see config.hpp for the trade-off).
 MAX_RAISES_PER_STREET = 4
-# 3×256 (~180k params) instead of 4×512 (~1M): the smaller net cuts the
-# per-node forward cost in the C++ data-gen path (the CPU bottleneck) ~3–4× and
-# generalises better on the data a ~30 h run produces. MUST match HIDDEN_DIM /
+# Tier-2b: 3×384. Calibration showed TRAINING (not CPU data-gen) is the
+# bottleneck on the 96-core+5060Ti box, so gen has headroom for a bigger net that
+# makes fewer value errors than the 3×256 it replaces. MUST match HIDDEN_DIM /
 # N_LAYERS in deep_cfr_cpp/src/config.hpp (rebuild the extension after changing)
 # — bot.py infers both from the .npz weight shapes, so it needs no edit.
-HIDDEN_DIM = 256
+HIDDEN_DIM = 384
 N_LAYERS   = 3     # hidden layers
 
 # ── Memory buffers ─────────────────────────────────────────────────────────
@@ -79,24 +80,26 @@ STRATEGY_BUF_CAP = 8_000_000
 # (averaging steps). Use --quick (5 iters × 200 games) to smoke-test the build.
 K_ITERATIONS      = 600
 GAMES_PER_ITER    = 25_000
-# Bigger batch better utilises the GPU on this tiny 4×512 MLP: at 4 096 the
-# per-step Python/transfer overhead dominated and GPU occupancy was low. 16 384
-# (4×) cuts step count for the same buffer coverage and raises occupancy. LR is
-# scaled by sqrt(4)=2× (the conservative Adam rule) to keep the update size
-# stable; the cosine scheduler in train.py decays from here.
-BATCH_SIZE        = 16_384
+# Calibration on the 96-core + RTX 5060 Ti box showed TRAINING (not CPU data-gen)
+# is the bottleneck: ~40 ms/step for this tiny MLP is host/launch-bound, not
+# compute-bound. A bigger batch amortises the per-step Python/transfer/sampling
+# overhead — the net fits easily, so 65 536 (4× the old 16 384) cuts step count
+# and H2D copies 4× for the same buffer coverage. LR kept at 2e-3 (conservative;
+# raise toward 3-4e-3 only if the loss curve stays smooth) — watch calibration.
+BATCH_SIZE        = 65_536
 LEARNING_RATE     = 2e-3
 
-# Step counts hold the epoch count fixed under the 4× larger batch (else a bigger
-# batch would silently quarter the passes over the buffer).
-# Regret net: retrained from scratch each iteration; ~5 passes over the full
-# buffer.  Formula: REGRET_BUF_CAP / BATCH_SIZE * 5 ≈ 2 441.
-REGRET_TRAIN_STEPS    = 2_500
+# Regret net is retrained from scratch each iteration. CFR converges through the
+# across-iteration time-average, not per-iter fit depth, so fewer steps/iter +
+# more iterations is the right trade under a fixed wall-clock budget. ~6 passes
+# over the 8M buffer at batch 65 536: REGRET_BUF_CAP / BATCH_SIZE * 6 ≈ 732.
+REGRET_TRAIN_STEPS    = 750
 
-# Strategy net: trained once at the end and ships in production.  Needs more
-# passes than the regret net.  Formula: STRATEGY_BUF_CAP / BATCH_SIZE * 25
-# ≈ 12 207.  The final LR is decayed by the cosine scheduler in train.py.
-STRATEGY_TRAIN_STEPS  = 12_500
+# Strategy net: trained once at the end and ships in production. Needs more passes
+# than the regret net but at batch 65 536 far fewer steps reach them: ~33 passes =
+# STRATEGY_BUF_CAP / BATCH_SIZE * 33 ≈ 4 030. The final LR is cosine-decayed in
+# train.py. Sized to fit the ~1h budget reserve for the final fit.
+STRATEGY_TRAIN_STEPS  = 4_000
 
 # ── Export ─────────────────────────────────────────────────────────────────
 MODEL_FILENAME = "gto_strategy"

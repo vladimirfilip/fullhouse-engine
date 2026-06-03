@@ -24,13 +24,14 @@ constexpr int BIG_BLIND    = 100;
 // Feature vector
 // 164 fixed (cards 104 + hero pos 6 + pot/stacks 7 + status masks 18 + street 4 +
 // scalars 6 + last-aggressor 13 + texture 5 + n_active 1) + 144 action history
-// (24 slots × 6 floats). See features.cpp for the exact layout — must match
-// _build_feature_vector in bots/vlad/bot.py byte-for-byte.
-constexpr int INPUT_DIM    = 308;
-// 3×256 net: shrunk from 4×512 to cut the per-node data-gen forward cost (the
-// CPU bottleneck). HIDDEN_DIM/N_LAYERS are read by make_net() + forward_single,
-// so changing them DOES require rebuilding the extension (make build-cpp).
-constexpr int HIDDEN_DIM   = 256;
+// (16 slots × 6 floats). See features.cpp for the exact layout — must match
+// _build_feature_vector in bots/the_house/bot.py byte-for-byte.
+constexpr int INPUT_DIM    = 252;
+// Tier-2b: 3×384 net. Calibration showed training (not CPU data-gen) is the
+// bottleneck on the 96-core+5060Ti box, so gen has headroom for a bigger net
+// that makes fewer value errors. HIDDEN_DIM/N_LAYERS are read by make_net() +
+// forward_single, so changing them DOES require rebuilding the extension.
+constexpr int HIDDEN_DIM   = 384;
 constexpr int N_LAYERS     = 3;   // hidden layers
 
 // Memory buffers
@@ -58,6 +59,22 @@ constexpr float LEAKY_ALPHA = 0.01f;
 // weight = t^DCFR_ALPHA instead of t.  α=1.5 is the canonical DCFR value and
 // keeps weights numerically tame (t≤300 → t^1.5 ≤ ~5 200, safe in float32).
 constexpr float DCFR_ALPHA = 1.5f;
+
+// ── Regret-based pruning (Tier-2b) ──────────────────────────────────────────
+// At traverser nodes, skip recursion into actions that regret matching has
+// already zeroed (strategy=0, i.e. non-positive regret) AND whose regret sits
+// in the worst fraction of the node's regret range. They contribute 0 to the
+// node EV (strategy=0, so the EV stays exact) and keep their carried-forward
+// negative regret target, so they remain pruned. ~30-55% fewer traversed nodes
+// once regrets stabilise.
+//  - Gated off until the regret net is no longer random (iteration_t >= start),
+//    because raw_regrets from a fresh net are meaningless.
+//  - Scale-free margin (fraction of the node's max-min regret span), so no
+//    chip-EV tuning is needed.
+//  - Always keeps at least MIN_TRAVERSE_ACTIONS to bound variance.
+constexpr int   PRUNE_START_ITER     = 30;
+constexpr float PRUNE_MARGIN_FRAC    = 0.60f;
+constexpr int   MIN_TRAVERSE_ACTIONS = 2;
 
 // Adam defaults matching PyTorch
 constexpr float ADAM_BETA1 = 0.9f;

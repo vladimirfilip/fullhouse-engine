@@ -6,9 +6,78 @@
 #include "train.hpp"
 #include "network.hpp"
 #include "config.hpp"
+#include "features.hpp"
+#include "engine.hpp"
+#include "card.hpp"
 
 namespace py = pybind11;
 using farray = py::array_t<float, py::array::c_style | py::array::forcecast>;
+
+// ── Feature-parity helper ───────────────────────────────────────────────────
+// Build the INPUT_DIM feature vector from a Python game-state dict in the SAME
+// format bots/the_house/bot.py consumes, so a test can assert the C++ producer
+// and the Python production mirror agree byte-for-byte. dealer_seat and
+// n_raises_this_street are passed explicitly (the bot derives them from the log
+// via shared, unchanged helpers — this isolates the feature LAYOUT parity).
+static ActionType _action_from_str(const std::string& a) {
+    if (a == "fold")        return ActionType::FOLD;
+    if (a == "check")       return ActionType::CHECK;
+    if (a == "call")        return ActionType::CALL;
+    if (a == "raise")       return ActionType::RAISE;
+    if (a == "all_in")      return ActionType::ALL_IN;
+    if (a == "small_blind") return ActionType::SMALL_BLIND;
+    if (a == "big_blind")   return ActionType::BIG_BLIND;
+    throw std::runtime_error("bad action: " + a);
+}
+
+static farray build_features_py(py::dict d) {
+    StateDict s{};
+    s.seat_to_act          = d["seat_to_act"].cast<int>();
+    s.dealer_seat          = d["dealer_seat"].cast<int>();
+    s.pot                  = d["pot"].cast<int>();
+    s.current_bet          = d.contains("current_bet") ? d["current_bet"].cast<int>() : 0;
+    s.min_raise_to         = d.contains("min_raise_to") ? d["min_raise_to"].cast<int>() : 0;
+    s.amount_owed          = d["amount_owed"].cast<int>();
+    s.your_stack           = d["your_stack"].cast<int>();
+    s.your_bet_this_street = d["your_bet_this_street"].cast<int>();
+    s.n_raises_this_street = d["n_raises_this_street"].cast<int>();
+    std::string st = d["street"].cast<std::string>();
+    s.street = (st == "preflop") ? 0 : (st == "flop") ? 1 : (st == "turn") ? 2 : 3;
+
+    auto yc = d["your_cards"].cast<std::vector<std::string>>();
+    s.your_cards[0] = card_from_str(yc[0]);
+    s.your_cards[1] = card_from_str(yc[1]);
+    auto cc = d["community_cards"].cast<std::vector<std::string>>();
+    s.n_community = (int)cc.size();
+    for (int i = 0; i < s.n_community; i++) s.community_cards[i] = card_from_str(cc[i]);
+
+    auto players = d["players"].cast<std::vector<py::dict>>();
+    s.n_players_seated = (int)players.size();
+    for (int i = 0; i < s.n_players_seated; i++) {
+        py::dict p = players[i];
+        PlayerState ps{};
+        ps.seat            = p["seat"].cast<int>();
+        ps.stack           = p["stack"].cast<int>();
+        ps.bet_this_street = p["bet_this_street"].cast<int>();
+        ps.is_folded       = p["is_folded"].cast<bool>();
+        ps.is_all_in       = p["is_all_in"].cast<bool>();
+        s.players[i] = ps;
+    }
+
+    for (auto item : d["action_log"].cast<std::vector<py::dict>>()) {
+        ActionEntry ae{};
+        ae.seat   = item["seat"].cast<int>();
+        py::object amt = item["amount"];
+        ae.amount = amt.is_none() ? 0 : amt.cast<int>();
+        ae.action = _action_from_str(item["action"].cast<std::string>());
+        s.action_log.push_back(ae);
+    }
+
+    FeatureVec fv = build_feature_vector(s);
+    farray out((py::ssize_t)INPUT_DIM);
+    std::memcpy(out.mutable_data(), fv.data(), INPUT_DIM * sizeof(float));
+    return out;
+}
 
 // Reconstruct MLP from flat list of numpy arrays [W0, b0, W1, b1, ...].
 // W_i shape: [out_dim, in_dim] row-major (matches PyTorch param.numpy() layout).
@@ -163,6 +232,10 @@ PYBIND11_MODULE(deep_cfr_gen, m) {
     m.attr("N_ACTIONS")  = N_ACTIONS;
     m.attr("HIDDEN_DIM") = HIDDEN_DIM;
     m.attr("N_LAYERS")   = N_LAYERS;
+
+    m.def("build_features", &build_features_py, py::arg("state"),
+          "Build the INPUT_DIM feature vector from a game-state dict (feature "
+          "parity check vs bots/the_house/bot.py._build_feature_vector).");
 
     py::class_<DeepCFRBuffers>(m, "DeepCFRBuffers")
         .def(py::init<int, int>(),
