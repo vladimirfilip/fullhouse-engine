@@ -75,13 +75,19 @@ def _compare(name, gs):
     if bot_vec.shape != cpp_vec.shape:
         print(f"FAIL {name}: shape {bot_vec.shape} (bot) vs {cpp_vec.shape} (cpp)")
         return False
-    if not np.array_equal(bot_vec, cpp_vec):
-        diff = np.where(~np.isclose(bot_vec, cpp_vec, atol=1e-6))[0]
-        print(f"FAIL {name}: {len(diff)} differing indices, first few:")
-        for i in diff[:8]:
+    # Compare with a tolerance: C++ (Eigen float) and numpy round the few divided
+    # / log-scaled features differently in the last float32 bit (~1e-7). A real
+    # LAYOUT error flips a one-hot 0<->1 (diff = 1.0), far above this tolerance.
+    d = np.abs(bot_vec.astype(np.float64) - cpp_vec.astype(np.float64))
+    maxdiff = float(d.max())
+    TOL = 1e-4
+    if maxdiff > TOL:
+        idx = np.where(d > TOL)[0]
+        print(f"FAIL {name}: {len(idx)} differing indices (max |Δ|={maxdiff:.2e}):")
+        for i in idx[:8]:
             print(f"    [{i}] bot={bot_vec[i]:.5f}  cpp={cpp_vec[i]:.5f}")
         return False
-    print(f"ok   {name}")
+    print(f"ok   {name}  (max |Δ|={maxdiff:.1e})")
     return True
 
 
