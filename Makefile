@@ -1,7 +1,7 @@
 .PHONY: install install-train install-train-gpu install-system install-vm \
         build-cpp clean-cpp train train-quick train-resume \
         train-preflop train-preflop-quick \
-        demo test validate clean release release-zip
+        demo test validate clean release release-zip release-check
 
 # ── VM Python config ────────────────────────────────────────────────────────
 # install-vm pins to Python 3.10 because eval7 0.1.7 ships pre-generated C
@@ -151,8 +151,15 @@ clean:
 # ── Release: package bot.py + data/ into a timestamped snapshot ─────────────
 # Pick which bot under bots/ to package, e.g. `make release-zip NAME=the_house`.
 NAME ?= vlad
-release:
+# data/*.npz is gitignored and bot.py silently falls back without it, so refuse
+# to package a bot whose weights are missing.
+release-check:
+	@test -d bots/$(NAME)/data || { echo "error: bots/$(NAME)/data missing (*.npz is gitignored; copy the weights in first)"; exit 1; }
+	@if [ "$(NAME)" = vlad ]; then for f in gto_strategy.npz preflop_cfr/preflop_strategy.npz; do \
+		test -f bots/vlad/data/$$f || { echo "error: bots/vlad/data/$$f missing"; exit 1; }; done; fi
+
+release: release-check
 	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); src='bots/$(NAME)'; d='bots/$(NAME)_'+ts; shutil.copytree(src+'/data',d+'/data'); shutil.copy(src+'/bot.py',d+'/bot.py'); print('Release ready: '+d)"
 
-release-zip:
+release-zip: release-check
 	python3 -c "import shutil,datetime; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S'); src='bots/$(NAME)'; d='bots/$(NAME)_'+ts; shutil.copytree(src+'/data',d+'/data'); shutil.copy(src+'/bot.py',d+'/bot.py'); shutil.make_archive(d,'zip',root_dir=d); shutil.rmtree(d); print('Release ready: '+d+'.zip')"

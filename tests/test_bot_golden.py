@@ -21,6 +21,10 @@ _bot_spec = importlib.util.spec_from_file_location(
 )  # noqa: E501
 _bot_mod = importlib.util.module_from_spec(_bot_spec)
 _bot_spec.loader.exec_module(_bot_mod)  # type: ignore
+# Pin the fallback paths: data/*.npz is gitignored, so golden output must not
+# depend on whether a given checkout has the net or the preflop table.
+_bot_mod._GTO_LAYERS = None
+_bot_mod._PREFLOP_TABLE = None
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -39,7 +43,7 @@ def _players(n=6, stack=9900, overrides=None):
 
 
 SCENARIOS = {
-    # 1. Preflop CFR table path: UTG facing BB, 6-max 100bb
+    # 1. Preflop heuristic: UTG facing BB, 6-max 100bb
     "preflop_utg_vs_bb": {
         "hand_id": "m1_h0001",
         "your_cards": ["Ah", "Kh"],
@@ -96,7 +100,7 @@ SCENARIOS = {
         "match_action_log": [],
     },
 
-    # 3. Preflop, 4 players — preflop table inapplicable, falls to GTO net
+    # 3. Preflop, 4 players
     "preflop_4handed": {
         "hand_id": "m1_h0003",
         "your_cards": ["7d", "6d"],
@@ -121,7 +125,7 @@ SCENARIOS = {
         "match_action_log": [],
     },
 
-    # 4. Flop, facing half-pot bet — GTO path with realtime equity search
+    # 4. Flop, facing half-pot bet — MC path
     "flop_facing_bet": {
         "hand_id": "m1_h0004",
         "your_cards": ["As", "Qs"],
@@ -152,7 +156,7 @@ SCENARIOS = {
         "match_action_log": [],
     },
 
-    # 5. Turn, check-to — GTO path, no fold/call tension
+    # 5. Turn, check-to — MC path, no fold/call tension
     "turn_check_to": {
         "hand_id": "m1_h0005",
         "your_cards": ["Kd", "Qd"],

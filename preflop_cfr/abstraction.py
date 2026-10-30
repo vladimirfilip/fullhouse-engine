@@ -40,58 +40,6 @@ def fnv1a_64(data: bytes) -> int:
     return struct.unpack("q", struct.pack("Q", h))[0]
 
 
-# ── Action-amount translation ─────────────────────────────────────────────────
-# Convert a real chip amount (raise-to total) into the nearest abstract action
-# index.  Used in bot.py to translate observed opponent bets into the history
-# sequence the solver was trained on.
-
-def amount_to_abstract(raise_to: int, pot: int, current_bet: int,
-                        your_bet_this_street: int) -> int:
-    """
-    Map a 'raise to X chips' amount to the closest *sized* PREFLOP_ACTIONS raise
-    index.  Returns CHECK_CALL if the amount is <= current_bet (call/check).
-
-    NOTE: this never returns ALL_IN — it only ranks the sized-raise fractions and
-    has no stack information to detect a shove.  The solver tree records ALL_IN as
-    a distinct action (game.legal_actions/apply_action), so callers replaying an
-    action log MUST map an "all_in" action straight to config.ALL_IN and only
-    route genuine "raise" actions through this function.  The engine normalises a
-    full-stack "raise" to an "all_in" action (engine/game.py:_validate), so the
-    action label alone is sufficient to tell them apart.  bot.py's mirror
-    (_pf_amount_to_abstract / _preflop_infoset_key) follows the same rule.
-    """
-    eff_pot = pot + max(0, current_bet - your_bet_this_street)
-    if eff_pot <= 0:
-        return config.CHECK_CALL
-
-    raise_size = raise_to - current_bet   # extra chips above current bet
-    if raise_size <= 0:
-        return config.CHECK_CALL
-
-    # pot-fraction of raise (relative to effective pot)
-    frac = raise_size / eff_pot
-
-    # fractions for the active raise actions (same as _abstract_to_raw in bot.py)
-    _FRACS = [
-        (config.BET_0_27X_POT, 0.27),
-        (config.BET_THIRD_POT, 0.333),
-        (config.BET_HALF_POT,  0.50),
-        (config.BET_FULL_POT,  1.00),
-        (config.BET_1_72X_POT, 1.72),
-        (config.BET_2X_POT,    2.00),
-    ]
-
-    best_idx, best_dist = config.CHECK_CALL, float("inf")
-    for action_idx, target_frac in _FRACS:
-        if action_idx not in config.PREFLOP_ACTIONS:
-            continue
-        dist = abs(frac - target_frac)
-        if dist < best_dist:
-            best_dist = dist
-            best_idx  = action_idx
-    return best_idx
-
-
 # ── Facing-size bucket ────────────────────────────────────────────────────────
 # Coarse bucket of the bet hero must call, relative to the pot.  Mirrored in
 # bot.py (_pf_facing_bucket).  Boundaries are deliberately coarse so tiny

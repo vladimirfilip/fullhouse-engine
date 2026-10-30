@@ -89,11 +89,11 @@ Valid return values:
 
 ### `bots/vlad/bot.py` — Current Implementation
 
-Loads a pre-trained GTO strategy network at import time (`bots/vlad/data/gto_strategy.npz`). Falls back to Monte Carlo equity if the model is unavailable.
+Loads a pre-trained GTO strategy network at import time (`bots/vlad/data/gto_strategy.npz`). Falls back to Monte Carlo equity if the model is unavailable. `*.npz` is gitignored, so a fresh checkout has no `bots/vlad/data/` and silently runs the fallbacks; copy the weights in before benchmarking. `make release`/`release-zip` refuse to package without them.
 
 **GTO path:** `_build_feature_vector(gs)` → 308-element float32 vector → pure-numpy MLP forward pass (LeakyReLU activations) → softmax → pick highest-probability legal action. RNG seeded from game state for replay stability.
 
-**Real-time EV blending:** `_realtime_search(gs, legal, gto_probs)` — 600-iteration MC equity + 1-level lookahead. Fold model: `fp = min(0.10 + 0.18 × (bet/pot), 0.70)`. Decision: 60% GTO network + 40% EV signal.
+**Real-time adjustment:** `_realtime_search(gs, legal, gto_probs, ...)` keeps the network's raise sizing and only shifts action-class mass. Facing a bet: moves probability between FOLD and CHECK_CALL by MC equity edge over pot odds (±20 pp) plus a read-gated exploit shift (±35 pp cap). Not facing a bet: moves CHECK_CALL mass into bets by the exploit `bet_shift`. Both paths then pass through `_equity_clamp`.
 
 **MC fallback:** `monte_carlo_equity(...)` — shuffles deck, evaluates with eval7. Includes opponent profiling (maniac / calling station / nit detected from match action log) to adjust equity buffers.
 
@@ -120,7 +120,7 @@ Pure-Python tabular External-Sampling MCCFR for the canonical **6-handed 100bb**
 **Key files:**
 - **`config.py`** — hyperparameters: `PREFLOP_ACTIONS` (active subset of the 9-action space), `ITERATIONS`, equity-table settings, export/checkpoint paths.
 - **`cards.py`** — 169-bucket hand canonicalization (`hand_to_bucket`); `fresh_deck`, `deal_hands`, suit-isomorphic cache key.
-- **`abstraction.py`** — `infoset_key` (FNV-1a 64-bit hash of `position|history|bucket`); `amount_to_abstract` (maps observed bet sizes to the nearest abstract action). **Single source of truth** — `bot.py` contains a mirrored copy of these functions.
+- **`abstraction.py`** — `infoset_key` (FNV-1a 64-bit hash of `hero_pos|n_raises|facing|n_live|committed|last_aggr|bucket`) and `facing_bucket`. **Single source of truth** — `bot.py` contains a mirrored copy of these functions.
 - **`equity.py`** — Lazy-built 169×169 HU equity table; cached multiway MC rollout via `eval7.evaluate`.
 - **`game.py`** — `PreflopState` dataclass + `make_initial_state`, `legal_actions`, `apply_action`, `is_terminal`, `terminal_utilities`. Mirrors engine blind/seat rules and `bot.py` sizing exactly.
 - **`cfr.py`** — `run_iteration(traverser, regret_sum, strategy_sum)`: one ES-MCCFR traversal. Opponent nodes sample one action; traverser nodes enumerate all and accumulate regrets.
@@ -135,7 +135,7 @@ python -m preflop_cfr.train --iters 100000 --workers 8
 python -m preflop_cfr.train --resume     # resume from checkpoint
 ```
 
-**`bot.py` integration:** at import time, `bot.py` loads the table into `_PREFLOP_TABLE`. The `_preflop_table_decide` hook fires before the GTO net whenever `street == "preflop"` AND the live config matches (6 active players, stacks ≈ 100bb ±25%). The info-set key helpers (`_preflop_bucket`, `_preflop_infoset_key`) are self-contained mirrors of `abstraction.py` — any change to the key encoding must be reflected in both.
+**`bot.py` integration:** at import time, `bot.py` loads the table into `_PREFLOP_TABLE`. The `_preflop_table_decide` hook fires before the GTO net whenever `street == "preflop"` AND the live config matches (6 players dealt in, any number already folded; live stacks ≈ 100bb ±25%). The info-set key helpers (`_preflop_bucket`, `_preflop_infoset_key`) are self-contained mirrors of `abstraction.py` — any change to the key encoding must be reflected in both.
 
 ### `deep_cfr/` — Python Training Orchestration
 

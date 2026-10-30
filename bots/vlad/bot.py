@@ -8,6 +8,7 @@ import math
 import os
 import random
 import time
+import struct
 from bisect import bisect_left as _bisect_left
 
 import numpy as np
@@ -253,32 +254,6 @@ def _hero_position(gs: dict) -> tuple[int, int]:
         sb_seat = al[0]["seat"]
         dealer  = sb_seat if n_in_game == 2 else (sb_seat - 1) % n_in_game
     return (seat - dealer) % n_in_game, n_in_game
-
-
-def _in_position(gs: dict) -> bool:
-    """True if hero acts last among the still-live players this (postflop) street.
-
-    Postflop the betting order runs clockwise from the small blind (offset 1 from
-    the dealer) and the button (offset 0) acts last, so a player's "order rank" is
-    (offset - 1) mod n. Hero is in position when no live opponent has a higher
-    rank. Equity realises better in position (you see opponents act, can check
-    back, bluff, and control the pot), so the continue threshold is relaxed IP and
-    tightened OOP in _mc_postflop.
-    """
-    seat = gs["seat_to_act"]
-    hero_off, n = _hero_position(gs)
-    dealer = (seat - hero_off) % n
-
-    def rank(off: int) -> int:
-        return (off - 1) % n
-
-    hero_rank = rank(hero_off)
-    for p in gs["players"]:
-        if p["seat"] == seat or p.get("is_folded") or p.get("state") in ("folded", "busted"):
-            continue
-        if rank((p["seat"] - dealer) % n) > hero_rank:
-            return False
-    return True
 
 
 # ── Feature extraction (mirrors deep_cfr_cpp/src/features.cpp) ─────────────
@@ -581,47 +556,11 @@ _PF_FNV_PRIME  = 1099511628211
 
 
 def _pf_fnv1a(data: bytes) -> int:
-    import struct
     h = _PF_FNV_OFFSET
     for byte in data:
         h ^= byte
         h  = (h * _PF_FNV_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
     return struct.unpack("q", struct.pack("Q", h))[0]
-
-
-# -- mirrored: amount_to_abstract (preflop_cfr/abstraction.py) --
-# All raise fractions, keyed by abstract action index.
-_PF_RAISE_FRACS = {
-    _0_27X: 0.27,
-    _THIRD: 1.0 / 3.0,
-    _HALF:  0.50,
-    _FULL:  1.00,
-    _1_72X: 1.72,
-    _2X:    2.00,
-}
-# BUG-FIX (key mismatch): training (abstraction.py) only maps observed bets to
-# raise actions in config.PREFLOP_ACTIONS.  The shipped table uses
-# [HALF, FULL, 2X] (npz "actions" field).  Including the off-grid sizes here
-# would emit history tokens that never exist in the table → guaranteed info-set
-# misses on every raised pot.  Default to the training subset; the loader below
-# overrides this from the table's own "actions" metadata.
-_PF_TABLE_RAISE_ACTIONS = [_HALF, _FULL, _2X]
-_PF_ACTIVE_RAISES = [(a, _PF_RAISE_FRACS[a]) for a in _PF_TABLE_RAISE_ACTIONS]
-
-
-def _pf_amount_to_abstract(raise_to: int, pot: int,
-                            current_bet: int, bet_this_street: int) -> int:
-    eff_pot    = pot + max(0, current_bet - bet_this_street)
-    raise_size = raise_to - current_bet
-    if raise_size <= 0 or eff_pot <= 0:
-        return _CHECK_CALL
-    frac = raise_size / eff_pot
-    best_idx, best_dist = _CHECK_CALL, float("inf")
-    for a_idx, target_frac in _PF_ACTIVE_RAISES:
-        dist = abs(frac - target_frac)
-        if dist < best_dist:
-            best_dist, best_idx = dist, a_idx
-    return best_idx
 
 
 # -- mirrored: facing_bucket (preflop_cfr/abstraction.py) --
@@ -722,13 +661,6 @@ if _USE_PREFLOP_TABLE:
             _pf_keys = _pf_data["keys"]
             _pf_strat = _pf_data["strategy"]
             _PREFLOP_TABLE = {int(k): _pf_strat[i] for i, k in enumerate(_pf_keys)}
-            # Rebuild the raise-action subset from the table's own metadata so
-            # inference histories match exactly what was trained (Bug B fix).
-            if "actions" in _pf_data:
-                _acts = [int(x) for x in str(_pf_data["actions"]).strip("[] ").split(",") if x.strip()]
-                _raises = [a for a in _acts if a in _PF_RAISE_FRACS]
-                if _raises:
-                    _PF_ACTIVE_RAISES = [(a, _PF_RAISE_FRACS[a]) for a in _raises]
     except Exception:
         pass
 
@@ -738,10 +670,11 @@ def _preflop_applicable(gs: dict) -> bool:
     if gs.get("street") != "preflop":
         return False
     players = gs["players"]
-    active  = [p for p in players
-               if not p.get("is_folded") and p.get("state") != "busted"]
-    if len(active) != _N_PLAYERS:
+    # Table covers 6 dealt-in seats with any number already folded (n_live is in
+    # the key); match.py drops busted players, so len(players) is the dealt count.
+    if len(players) != _N_PLAYERS:
         return False
+    active  = [p for p in players if not p.get("is_folded")]
     target = _INITIAL_STACK
     for p in active:
         stack = p["stack"]
@@ -1075,8 +1008,14 @@ def _preflop_context(gs: dict) -> dict:
     al     = gs["action_log"]
     off, n = _hero_position(gs)
 
-    n_raises = sum(1 for e in al if e.get("action") in ("raise", "all_in"))
-    limpers  = sum(1 for e in al if e.get("action") == "call") if n_raises == 0 else 0
+    # Same rule as _preflop_infoset_key: an all-in that does not top the current
+    # bet is a call, not a raise.
+    n_raises, cur = 0, _BIG_BLIND
+    for e in al:
+        if e.get("action") in ("raise", "all_in") and e.get("amount", 0) > cur:
+            n_raises += 1
+            cur = e["amount"]
+    limpers  =sum(1 for e in al if e.get("action") == "call") if n_raises == 0 else 0
 
     eff_bb = min(gs["your_stack"], _max_opponent_stack(gs)) / _BIG_BLIND
     return {

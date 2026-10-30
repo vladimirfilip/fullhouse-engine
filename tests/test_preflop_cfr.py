@@ -258,7 +258,7 @@ class TestInfosetKeyParity:
 
     def test_all_in_distinct_from_sized_raise(self):
         """A shove and a sized raise in the same spot must produce DIFFERENT
-        info-set keys.  Before the fix both were routed through amount_to_abstract
+        info-set keys.  Before the fix both were mapped to the nearest sized raise
         and collapsed onto BET_FULL_POT — colliding keys that mis-queried the
         solved table (which records ALL_IN as a distinct action)."""
         shove = [
@@ -273,6 +273,34 @@ class TestInfosetKeyParity:
         ]
         cards = ["Kh", "Kd"]
         assert self._bot_key(cards, shove, seat=2) != self._bot_key(cards, sized, seat=2)
+
+    def test_table_used_after_fold(self, monkeypatch):
+        """The table has n_live rows below 6, so it must still answer once
+        someone has folded (UTG folds, MP to act)."""
+        al = [
+            {"seat": 1, "action": "small_blind", "amount": 50},
+            {"seat": 2, "action": "big_blind",   "amount": 100},
+            {"seat": 3, "action": "fold",         "amount": 0},
+        ]
+        gs = self._make_gs(["Ah", "Kh"], al, seat=4)
+        gs["players"][3]["is_folded"] = True
+        gs["players"][3]["state"] = "folded"
+        probs = np.zeros(9, dtype=np.float32)
+        probs[1] = 1.0   # CHECK_CALL only
+        monkeypatch.setattr(_bot_mod, "_PREFLOP_TABLE",
+                            {_bot_mod._preflop_infoset_key(gs): probs})
+        assert _bot_mod._preflop_table_decide(gs) == {"action": "call"}
+
+    def test_short_all_in_not_counted_as_raise(self):
+        """An all-in below the current bet is a call for raise counting."""
+        al = [
+            {"seat": 1, "action": "small_blind", "amount": 50},
+            {"seat": 2, "action": "big_blind",   "amount": 100},
+            {"seat": 3, "action": "raise",        "amount": 300},
+            {"seat": 4, "action": "all_in",       "amount": 250},
+        ]
+        gs = self._make_gs(["Ah", "Kh"], al, seat=5)
+        assert _bot_mod._preflop_context(gs)["n_raises"] == 1
 
 
 # ── 4. Game mechanics ─────────────────────────────────────────────────────────

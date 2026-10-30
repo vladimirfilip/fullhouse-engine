@@ -4,7 +4,7 @@
     "amount": 300
   },
   "preflop_bb_vs_3bet": {
-    "action": "all_in"
+    "action": "call"
   },
   "preflop_4handed": {
     "action": "raise",
